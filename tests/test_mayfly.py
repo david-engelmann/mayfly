@@ -1,10 +1,12 @@
 import json
 import os
+import re
 import select
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -15,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from mayfly import HarnessError, run_task
+from mayfly.backends import namespace as namespace_module
 from mayfly.backends.base import RunSpec
 from mayfly.backends.namespace import NamespaceBackend
 
@@ -24,12 +27,54 @@ pytestmark = pytest.mark.skipif(
 
 PY = sys.executable
 
+FORCE_REFUSAL_SWITCH = "MAYFLY_TEST_FORCE_SANDBOX_REFUSAL"
+
+
+def _probe_sandbox():
+    """Ask whether this host can start a real sandbox at all.
+
+    One trivial task runs through the real backend. Where the
+    run ends in a task outcome the host can start a sandbox and
+    the answer is (True, an empty refusal). Where it does not,
+    the answer is (False, the refusal the failed run reported),
+    so a skip reason names the refusal the host actually gave,
+    the uid map refusal on a host that forbids the user
+    namespace mapping above all. A suite that cannot tell a
+    host that forbids the sandbox from a sandbox that is broken
+    fails wholesale on the first kind of host and says nothing
+    true about either. The MAYFLY_TEST_FORCE_SANDBOX_REFUSAL
+    switch is a test only hook that forces the refusal answer,
+    so the guards below can be shown to fire.
+    """
+    if os.environ.get(FORCE_REFUSAL_SWITCH):
+        return False, "the probe was forced to report a refusal by " + FORCE_REFUSAL_SWITCH
+    probe_root = Path(tempfile.mkdtemp(prefix="mayfly-probe-"))
+    try:
+        report = run_task([PY, "-c", "pass"], probe_root)
+    finally:
+        shutil.rmtree(probe_root, ignore_errors=True)
+    if report.outcome == "task":
+        return True, ""
+    refusal = " ".join(
+        part for part in (report.error, report.stderr_tail) if part
+    ).strip()
+    return False, refusal or "the sandbox did not start and gave no reason"
+
+
+_SANDBOX_OK, _SANDBOX_REFUSAL = _probe_sandbox()
+
+requires_sandbox = pytest.mark.skipif(
+    not _SANDBOX_OK,
+    reason="this host refuses to start a sandbox, " + _SANDBOX_REFUSAL,
+)
+
 
 def last_json(report):
     lines = [line for line in report.stdout_tail.strip().splitlines() if line.strip()]
     return json.loads(lines[-1])
 
 
+@requires_sandbox
 def test_run_report_carries_the_phases_and_the_outcome(tmp_path):
     report = run_task([PY, "-c", "import time; time.sleep(0.3); print('hello')"], tmp_path)
     assert report.backend == "namespace"
@@ -44,6 +89,7 @@ def test_run_report_carries_the_phases_and_the_outcome(tmp_path):
     assert isinstance(report.proc_mounted, bool)
 
 
+@requires_sandbox
 def test_task_exit_code_is_reported_exactly(tmp_path):
     report = run_task([PY, "-c", "import sys; sys.exit(7)"], tmp_path)
     assert report.outcome == "task"
@@ -51,6 +97,7 @@ def test_task_exit_code_is_reported_exactly(tmp_path):
     assert report.task_signal is None
 
 
+@requires_sandbox
 def test_task_killed_by_a_signal_is_reported_as_a_signal(tmp_path):
     report = run_task(
         [PY, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"], tmp_path
@@ -60,6 +107,7 @@ def test_task_killed_by_a_signal_is_reported_as_a_signal(tmp_path):
     assert report.task_signal == 15
 
 
+@requires_sandbox
 def test_a_task_exiting_at_125_is_a_task_outcome(tmp_path):
     report = run_task([PY, "-c", "import sys; sys.exit(125)"], tmp_path)
     assert report.outcome == "task"
@@ -89,6 +137,7 @@ def test_an_unknown_backend_fails_before_anything_is_prepared(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+@requires_sandbox
 def test_the_task_starts_in_the_work_directory_of_a_prepared_root(tmp_path):
     script = (
         "import json, os, socket\n"
@@ -110,6 +159,7 @@ def test_the_task_starts_in_the_work_directory_of_a_prepared_root(tmp_path):
     assert seen["work_dev"] != seen["root_dev"]
 
 
+@requires_sandbox
 def test_the_system_directories_are_read_only_inside(tmp_path):
     script = (
         "import json, os\n"
@@ -128,6 +178,7 @@ def test_the_system_directories_are_read_only_inside(tmp_path):
     assert seen["usr_write_errno"] == 30
 
 
+@requires_sandbox
 def test_the_environment_is_scrubbed_to_the_allowlist(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setenv("MAYFLY_LEAK_PROBE", "a secret value")
@@ -148,6 +199,7 @@ def test_the_environment_is_scrubbed_to_the_allowlist(tmp_path, monkeypatch):
     }
 
 
+@requires_sandbox
 def test_a_file_written_inside_is_gone_with_the_sandbox(tmp_path):
     script = (
         "import json, os\n"
@@ -162,6 +214,7 @@ def test_a_file_written_inside_is_gone_with_the_sandbox(tmp_path):
     assert list(tmp_path.rglob("proof.txt")) == []
 
 
+@requires_sandbox
 def test_no_process_from_the_task_tree_survives_teardown(tmp_path):
     read_fd, write_fd = os.pipe()
     script = (
@@ -246,6 +299,7 @@ CONNECT_SCRIPT = (
 )
 
 
+@requires_sandbox
 def test_the_default_profile_has_no_network(tmp_path):
     with LoopbackListener() as listener:
         report = run_task([PY, "-c", CONNECT_SCRIPT, str(listener.port)], tmp_path)
@@ -256,12 +310,14 @@ def test_the_default_profile_has_no_network(tmp_path):
         assert listener.received == []
 
 
+@requires_sandbox
 def test_the_default_profile_lists_only_loopback(tmp_path):
     script = "import json, socket; print(json.dumps([name for _, name in socket.if_nameindex()]))"
     report = run_task([PY, "-c", script], tmp_path)
     assert last_json(report) == ["lo"]
 
 
+@requires_sandbox
 def test_the_network_opt_in_shares_the_host_network(tmp_path):
     with LoopbackListener() as listener:
         report = run_task(
@@ -287,6 +343,7 @@ def run_cli(args, root):
     )
 
 
+@requires_sandbox
 def test_cli_mirrors_the_task_exit_code(tmp_path):
     result = run_cli(
         ["run", "--root", str(tmp_path), "--", PY, "-c", "import sys; sys.exit(7)"],
@@ -299,6 +356,7 @@ def test_cli_mirrors_the_task_exit_code(tmp_path):
     assert payload["backend"] == "namespace"
 
 
+@requires_sandbox
 def test_cli_reports_a_signal_death_at_128_plus_the_signal(tmp_path):
     result = run_cli(
         [
@@ -339,6 +397,7 @@ def test_contract_carries_the_round_one_obligations():
     assert "namespace sandbox" in readme
 
 
+@requires_sandbox
 def test_the_stderr_tail_carries_a_failing_task_stderr(tmp_path):
     script = "import sys; sys.stderr.write('a named failure line' + chr(10)); sys.exit(3)"
     report = run_task([PY, "-c", script], tmp_path)
@@ -347,6 +406,7 @@ def test_the_stderr_tail_carries_a_failing_task_stderr(tmp_path):
     assert "a named failure line" in report.stderr_tail
 
 
+@requires_sandbox
 def test_a_python_task_sees_the_scrubbed_environment_through_its_interpreter(
     tmp_path, monkeypatch
 ):
@@ -362,6 +422,7 @@ def test_a_python_task_sees_the_scrubbed_environment_through_its_interpreter(
     }
 
 
+@requires_sandbox
 def test_an_allowlisted_coercion_key_keeps_the_caller_value(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setenv("PYTHONCOERCECLOCALE", "caller-chosen")
@@ -395,6 +456,7 @@ CAPS_SCRIPT = (
 )
 
 
+@requires_sandbox
 def test_the_task_holds_no_capabilities(tmp_path):
     report = run_task([PY, "-c", CAPS_SCRIPT], tmp_path)
     seen = last_json(report)
@@ -437,6 +499,7 @@ ESCAPE_SCRIPT = (
 )
 
 
+@requires_sandbox
 def test_the_chroot_climb_escape_shape_cannot_reach_the_host(tmp_path):
     secret = tmp_path / "host-secret.txt"
     secret.write_text("mayfly-host-secret", encoding="utf-8")
@@ -451,11 +514,15 @@ def test_the_chroot_climb_escape_shape_cannot_reach_the_host(tmp_path):
     assert not host_target.exists()
 
 
+@requires_sandbox
 def test_a_submount_of_a_bound_tree_is_read_only_inside(tmp_path):
     import uuid
 
     probe_dir = Path("/etc") / ("mayfly-subprobe-" + uuid.uuid4().hex[:12])
-    probe_dir.mkdir()
+    try:
+        probe_dir.mkdir()
+    except PermissionError:
+        pytest.skip("this machine would not let the probe create a directory under /etc")
     mounted = subprocess.run(
         ["mount", "-t", "tmpfs", "tmpfs", str(probe_dir)],
         capture_output=True,
@@ -502,6 +569,7 @@ def test_a_prepare_failure_report_carries_the_full_shape(tmp_path):
         assert phase in report.timings_ms, phase
 
 
+@requires_sandbox
 def test_a_large_task_output_is_bounded_to_its_tail(tmp_path):
     from mayfly.backends.namespace import TAIL_CHARS
 
@@ -559,6 +627,7 @@ def _start_cli_with_sleeping_task(root, marker):
     return proc
 
 
+@requires_sandbox
 def test_sigterm_to_the_supervisor_still_tears_the_sandbox_down(tmp_path):
     import signal as signal_module
     import uuid
@@ -574,6 +643,7 @@ def test_sigterm_to_the_supervisor_still_tears_the_sandbox_down(tmp_path):
     assert list(tmp_path.glob("run-*")) == []
 
 
+@requires_sandbox
 def test_sigkill_to_the_supervisor_leaves_no_process_and_no_sandbox(tmp_path):
     import signal as signal_module
     import uuid
@@ -648,14 +718,17 @@ def _plant_marker_and_sigkill(tmp_path, marker_content):
     assert list(tmp_path.glob(".mayfly-clean-*")) == []
 
 
+@requires_sandbox
 def test_a_planted_clean_marker_does_not_stand_the_janitor_down(tmp_path):
     _plant_marker_and_sigkill(tmp_path, "planted by anyone who can list the root\n")
 
 
+@requires_sandbox
 def test_a_forged_token_in_a_planted_marker_does_not_stand_the_janitor_down(tmp_path):
     _plant_marker_and_sigkill(tmp_path, "0" * 32 + "\n")
 
 
+@requires_sandbox
 def test_a_clean_run_leaves_no_marker_and_no_sandbox(tmp_path):
     report = run_task([PY, "-c", "print('done')"], tmp_path)
     assert report.outcome == "task"
@@ -663,6 +736,7 @@ def test_a_clean_run_leaves_no_marker_and_no_sandbox(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+@requires_sandbox
 def test_a_later_run_sweeps_an_orphan_whose_janitor_also_died(tmp_path):
     import signal as signal_module
     import uuid
@@ -686,6 +760,7 @@ def test_a_later_run_sweeps_an_orphan_whose_janitor_also_died(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+@requires_sandbox
 def test_the_sweep_never_touches_a_live_run(tmp_path):
     import signal as signal_module
     import uuid
@@ -708,6 +783,7 @@ def test_the_sweep_never_touches_a_live_run(tmp_path):
     assert list(tmp_path.glob("run-*")) == []
 
 
+@requires_sandbox
 def test_a_sandbox_killed_mid_task_does_not_claim_the_task_never_started(tmp_path):
     import signal as signal_module
     import uuid
@@ -746,6 +822,7 @@ def test_a_sandbox_that_dies_before_the_task_starts_keeps_the_plain_report(tmp_p
     assert list(root.iterdir()) == []
 
 
+@requires_sandbox
 def test_an_interrupted_run_reports_the_unfinished_task_phase_as_null(tmp_path):
     import signal as signal_module
     import uuid
@@ -764,3 +841,279 @@ def test_an_interrupted_run_reports_the_unfinished_task_phase_as_null(tmp_path):
     assert payload["timings_ms"]["total"] > 0
     assert _wait_until(lambda: not _host_pids_with_marker(marker), 15)
     assert list(tmp_path.glob("run-*")) == []
+
+
+def test_the_supported_architectures_are_the_documented_ones():
+    init_source = (ROOT / "mayfly" / "_init.py").read_text(encoding="utf-8")
+    for table in ("SYS_PIVOT_ROOT", "SYS_MOUNT_SETATTR"):
+        line = next(
+            line for line in init_source.splitlines() if line.startswith(table)
+        )
+        keys = set(re.findall(r'"([a-z0-9_]+)":', line))
+        assert keys == {"x86_64", "aarch64"}, table
+    contract = (ROOT / "CONTRACT.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for arch in ("x86_64", "aarch64"):
+        assert arch in contract
+        assert arch in readme
+
+
+def _drive_janitor(sandbox, marker, token):
+    """Run one janitor the way the runner runs it, with a dead supervisor.
+
+    The token arrives over standard input and the watch pipe is
+    closed at once, which is the supervisor dying without a
+    word. Returns the janitor exit code once it exits.
+    """
+    read_fd, write_fd = os.pipe()
+    janitor_path = ROOT / "mayfly" / "_janitor.py"
+    proc = subprocess.Popen(
+        [
+            PY,
+            str(janitor_path),
+            "--sandbox",
+            str(sandbox),
+            "--marker",
+            str(marker),
+            "--fd",
+            str(read_fd),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        pass_fds=(read_fd,),
+        start_new_session=True,
+    )
+    os.close(read_fd)
+    proc.stdin.write(token.encode("utf-8") + b"\n")
+    proc.stdin.close()
+    os.close(write_fd)
+    proc.wait(timeout=40)
+    return proc.returncode
+
+
+def test_the_janitor_marker_read_is_bounded_and_bad_bytes_read_as_no_token(tmp_path):
+    token = "ab" * 16
+    cases = (
+        ("genuine", (token + "\n").encode("utf-8"), True),
+        ("padded", (token + " " * 200 + "\n").encode("utf-8"), False),
+        ("badbytes", token.encode("utf-8") + b"\xff\xfe\n", False),
+    )
+    for name, content, stands_down in cases:
+        run_dir = tmp_path / name
+        sandbox = run_dir / "sandbox"
+        sandbox.mkdir(parents=True)
+        (sandbox / "leftover.txt").write_text("left behind", encoding="utf-8")
+        marker = run_dir / "clean-marker"
+        marker.write_bytes(content)
+        assert _drive_janitor(sandbox, marker, token) == 0, name
+        if stands_down:
+            assert sandbox.exists(), name
+        else:
+            assert not sandbox.exists(), name
+
+
+def _plant_marker_bytes_and_sigkill(tmp_path, content):
+    import signal as signal_module
+    import uuid
+
+    marker = "mayfly-death-" + uuid.uuid4().hex
+    proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    sandboxes = list(tmp_path.glob("run-*"))
+    assert len(sandboxes) == 1
+    run_id = sandboxes[0].name[len("run-"):]
+    planted = tmp_path / (".mayfly-clean-" + run_id)
+    planted.write_bytes(content)
+    proc.send_signal(signal_module.SIGKILL)
+    proc.wait(timeout=30)
+    assert _wait_until(lambda: not _host_pids_with_marker(marker), 30)
+    assert _wait_until(lambda: list(tmp_path.glob("run-*")) == [], 30)
+    assert list(tmp_path.glob(".mayfly-clean-*")) == []
+
+
+@requires_sandbox
+def test_a_planted_marker_with_bytes_that_are_not_text_does_not_stand_the_janitor_down(
+    tmp_path,
+):
+    _plant_marker_bytes_and_sigkill(tmp_path, b"\xff\xfe" * 64)
+
+
+@requires_sandbox
+def test_a_planted_oversized_marker_does_not_stand_the_janitor_down(tmp_path):
+    _plant_marker_bytes_and_sigkill(tmp_path, b"x" * (32 << 20))
+
+
+@requires_sandbox
+def test_the_sweep_skips_a_run_whose_liveness_is_unknown(tmp_path, monkeypatch):
+    import signal as signal_module
+    import uuid
+
+    marker = "mayfly-death-" + uuid.uuid4().hex
+    proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    sandboxes = list(tmp_path.glob("run-*"))
+    assert len(sandboxes) == 1
+    sandbox = sandboxes[0]
+    _age_directory(sandbox)
+    real_listdir = os.listdir
+
+    def refusing_listdir(path):
+        if os.fspath(path) == "/proc":
+            raise OSError("the process table cannot be listed")
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", refusing_listdir)
+    assert namespace_module._pids_referencing(str(sandbox)) is None
+    namespace_module._sweep_orphans(tmp_path)
+    assert sandbox.exists()
+    monkeypatch.undo()
+    proc.send_signal(signal_module.SIGTERM)
+    out, _ = proc.communicate(timeout=30)
+    assert proc.returncode == 125
+    assert json.loads(out)["outcome"] == "harness_error"
+    assert _wait_until(lambda: not _host_pids_with_marker(marker), 15)
+    assert list(tmp_path.glob("run-*")) == []
+
+
+@requires_sandbox
+def test_the_sweep_leaves_a_foreign_run_directory_standing(tmp_path):
+    root = tmp_path / "root"
+    foreign = root / "run-foreign0001"
+    foreign.mkdir(parents=True)
+    (foreign / "not-mayfly.txt").write_text(
+        "not a mayfly sandbox", encoding="utf-8"
+    )
+    _age_directory(foreign)
+    report = run_task([PY, "-c", "pass"], root)
+    assert report.outcome == "task"
+    assert (foreign / "not-mayfly.txt").read_text(encoding="utf-8") == (
+        "not a mayfly sandbox"
+    )
+    assert list(root.glob("run-*")) == [foreign]
+
+
+@requires_sandbox
+def test_the_sweep_leaves_a_directory_whose_provenance_names_another_run(tmp_path):
+    root = tmp_path / "root"
+    foreign = root / "run-aaaa00000001"
+    foreign.mkdir(parents=True)
+    (foreign / ".mayfly-provenance").write_text("bbbb00000002\n", encoding="utf-8")
+    _age_directory(foreign)
+    report = run_task([PY, "-c", "pass"], root)
+    assert report.outcome == "task"
+    assert foreign.exists()
+    assert list(root.glob("run-*")) == [foreign]
+
+
+FAKE_UNSHARE = """#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+argv = sys.argv[1:]
+fd = int(argv[argv.index("--status-fd") + 1])
+rootfs = argv[argv.index("--rootfs") + 1]
+sandbox = os.path.dirname(rootfs)
+mode = os.environ.get("MAYFLY_FAKE_MODE", "late-done")
+
+
+def emit(payload):
+    payload.setdefault("ts", time.monotonic())
+    os.write(fd, (json.dumps(payload) + "\\n").encode())
+
+
+def note(name):
+    with open(os.path.join(sandbox, name), "w") as handle:
+        handle.write("noted\\n")
+
+
+emit({"event": "ready", "proc_mounted": False})
+emit({"event": "started"})
+note("fake-started")
+if mode == "late-done":
+    pid = os.fork()
+    if pid == 0:
+        time.sleep(1.2)
+        emit({"event": "task_done", "exit_code": 0})
+        os._exit(0)
+    time.sleep(60)
+else:
+    emit({"event": "task_done", "exit_code": 0})
+    note("fake-done")
+    time.sleep(60)
+"""
+
+
+def _start_cli_with_fake_unshare(root, fakebin, mode):
+    fakebin.mkdir(parents=True, exist_ok=True)
+    fake = fakebin / "unshare"
+    fake.write_text(FAKE_UNSHARE, encoding="utf-8")
+    fake.chmod(0o755)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT)
+    env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+    env["MAYFLY_FAKE_MODE"] = mode
+    return subprocess.Popen(
+        [
+            PY,
+            "-m",
+            "mayfly",
+            "run",
+            "--root",
+            str(root),
+            "--allow-env",
+            "MAYFLY_FAKE_MODE",
+            "--",
+            PY,
+            "-c",
+            "pass",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+        env=env,
+    )
+
+
+def test_an_interrupt_before_the_task_done_stamp_is_a_harness_error(tmp_path):
+    import signal as signal_module
+
+    root = tmp_path / "root"
+    root.mkdir()
+    proc = _start_cli_with_fake_unshare(root, tmp_path / "fakebin", "late-done")
+    noted = _wait_until(
+        lambda: any((d / "fake-started").exists() for d in root.glob("run-*")),
+        30,
+    )
+    assert noted, "the fake sandbox never reported its start"
+    proc.send_signal(signal_module.SIGTERM)
+    out, _ = proc.communicate(timeout=30)
+    assert proc.returncode == 125
+    payload = json.loads(out)
+    assert payload["outcome"] == "harness_error"
+    assert payload["task_exit_code"] is None
+    assert "interrupted by signal 15" in payload["error"]
+    assert list(root.glob("run-*")) == []
+    assert list(root.glob(".mayfly-clean-*")) == []
+
+
+def test_an_interrupt_after_the_task_done_stamp_keeps_the_task_outcome(tmp_path):
+    import signal as signal_module
+
+    root = tmp_path / "root"
+    root.mkdir()
+    proc = _start_cli_with_fake_unshare(root, tmp_path / "fakebin", "done-early")
+    noted = _wait_until(
+        lambda: any((d / "fake-done").exists() for d in root.glob("run-*")),
+        30,
+    )
+    assert noted, "the fake sandbox never reported its task done"
+    proc.send_signal(signal_module.SIGTERM)
+    out, _ = proc.communicate(timeout=30)
+    assert proc.returncode == 0
+    payload = json.loads(out)
+    assert payload["outcome"] == "task"
+    assert payload["task_exit_code"] == 0
+    assert list(root.glob("run-*")) == []
+    assert list(root.glob(".mayfly-clean-*")) == []
