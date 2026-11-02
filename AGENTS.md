@@ -56,6 +56,6 @@ Verify claims from the thing itself. A result is read from the file on disk, the
 
 The contract for this repo lives in CONTRACT.md and it defines the obligations this repo must meet. Read CONTRACT.md and the README before changing anything in mayfly.
 
-Mayfly makes the box, switchyard furnishes it, and wayside remembers where everything was. Mayfly is a disposable micro-VM sandbox for agent tasks. It lives for about 200 milliseconds by design and it dies by design, with one fresh box spun up for one agent task and incinerated on exit.
+Mayfly makes the box, switchyard furnishes it, and wayside remembers where everything was. Mayfly is a disposable sandbox for agent tasks. One fresh box is built for one agent task and incinerated on exit, and what a run measurably did lives in the run report that run prints.
 
-The first slice of mayfly is a lifecycle harness over an existing micro-VM or container runtime. The harness spins a box up, runs one task inside it, and incinerates the box, with the timings measured and published. There is no custom hypervisor in slice one.
+The first slice of mayfly is a lifecycle harness whose first backend is a Linux namespace sandbox. The harness builds a box, runs one task inside it, and incinerates the box, with the timings measured per run and published in the run report. The lifecycle interface stays open to container or micro-VM backends in later rounds, where those runtimes exist. There is no custom hypervisor in slice one.
