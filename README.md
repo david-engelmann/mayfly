@@ -13,3 +13,13 @@ Seeded on 2026-10-29. The concept is claimed and the build has not started.
 ## Licence
 
 MIT. See LICENSE.
+
+## Status
+
+The remote seed was verified on 2026-11-02 against the staged seed and its commit is ca5df488b41c75114a08b752aaa0ed2eae255c92, a parentless commit holding exactly README.md and LICENSE and .gitignore. Setup is landing through a pull request and no work lands on main directly.
+
+The contract lives in CONTRACT.md. Setup obligations S1 to S5 are the contract state until the full contract lands as the first build act of this repo, and this setup slice claims no feature behaviour for mayfly.
+
+Closed perfection rounds are 0 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
+
+The local gate is python -m pytest -q plus python scripts/codepoint_scan.py, run on the exact final head before any push, with the continuous integration workflow running the same commands as a backstop.
