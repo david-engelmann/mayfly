@@ -10,6 +10,6 @@ Obligation S3 covers honest status. The README status section records the seed s
 
 Obligation S4 covers synthetic content only. Every fixture and every example in this repository is synthetic and written for this repo, and no file carries a real trace or a real transcript or a real name or any private operational detail. This is covered by inspection of the repository contents before any push.
 
-Obligation S5 covers the canonical agents file. The part of AGENTS.md above the marked line is identical to the canonical template for the program, and only the repo annex below the marked line differs for mayfly. This is covered by a test in the tests folder that checks the marked line and the annex and a heading from the canonical part.
+Obligation S5 covers the canonical agents file. The part of AGENTS.md above the marked line is identical to the canonical template for the program, and only the repo annex below the marked line differs for mayfly. This is covered by tests in the tests folder that pin the SHA-256 digest of the part above the marked line and check the marked line and the annex.
 
 The full contract for mayfly is the first build act of this repo and it lands with the first slice. This stub is not the full contract, and no feature claim for mayfly rests on this stub.
