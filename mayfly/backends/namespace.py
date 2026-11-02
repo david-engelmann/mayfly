@@ -108,6 +108,7 @@ def _drain_stream(stream, tail):
 
 
 ORPHAN_GRACE_SECONDS = 5.0
+PROVENANCE_NAME = ".mayfly-provenance"
 
 
 def _pids_referencing(path_text):
@@ -116,14 +117,17 @@ def _pids_referencing(path_text):
     A live run always has processes that name its sandbox
     directory, the janitor through its sandbox argument and the
     init through its rootfs argument, so a sandbox directory no
-    live process names belongs to a run that is over.
+    live process names belongs to a run that is over. Returns
+    None when the process table cannot be listed at all, because
+    an unlistable table says nothing about which runs are live
+    and must never read as an empty one.
     """
     needle = os.fsencode(path_text)
     found = []
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return found
+        return None
     for entry in entries:
         if not entry.isdigit():
             continue
@@ -143,11 +147,16 @@ def _pids_referencing(path_text):
 def _sweep_orphans(root):
     """Remove sandbox directories under root whose runs are dead.
 
-    A directory is swept only when it is older than the grace
-    period, so a run still being prepared by a concurrent process
-    is never touched, and only when no live process names it, so
-    a live run of any age keeps its sandbox. A clean marker whose
-    run directory is already gone is swept on the same terms. A
+    A directory is swept only when the provenance file the
+    runner wrote inside it at creation names the same run id as
+    the directory itself, so a directory mayfly did not create
+    is never swept however it is named, and only when it is
+    older than the grace period, so a run still being prepared
+    by a concurrent process is never touched, and only when no
+    live process names it, so a live run of any age keeps its
+    sandbox. Where the process table cannot be listed, liveness
+    is unknown and nothing is swept. A clean marker whose run
+    directory is already gone is swept on the same terms. A
     sweep failure never breaks the run that triggered it.
     """
     try:
@@ -160,10 +169,20 @@ def _sweep_orphans(root):
             if entry.is_dir() and entry.name.startswith("run-"):
                 if now - entry.stat().st_mtime < ORPHAN_GRACE_SECONDS:
                     continue
-                if _pids_referencing(str(entry)):
+                run_id = entry.name[len("run-"):]
+                try:
+                    recorded = (entry / PROVENANCE_NAME).read_text(
+                        encoding="utf-8"
+                    ).strip()
+                except OSError:
+                    continue
+                if recorded != run_id:
+                    continue
+                referencing = _pids_referencing(str(entry))
+                if referencing is None or referencing:
                     continue
                 shutil.rmtree(entry, ignore_errors=True)
-                marker = root / (".mayfly-clean-" + entry.name[len("run-"):])
+                marker = root / (".mayfly-clean-" + run_id)
                 try:
                     marker.unlink()
                 except OSError:
@@ -183,19 +202,27 @@ def _sweep_orphans(root):
 
 
 @contextmanager
-def _signal_guard(interrupted):
+def _signal_guard(interrupted, interrupt_times=None):
     """Record SIGTERM and SIGINT instead of dying on them mid run.
 
     The handlers only append the signal number, and the wait loop
     in run polls the list, kills the sandbox, and tears it down.
-    Handlers exist only on the main thread, so a run driven from a
-    worker thread gets none and keeps the default behaviour.
+    Where a times list is given, the handler also stamps the
+    moment each signal was received on the same monotonic clock
+    the init stamps its events with, so the outcome logic can
+    compare the receipt of an interrupt against the task done
+    stamp rather than against when the runner happened to drain
+    the event. Handlers exist only on the main thread, so a run
+    driven from a worker thread gets none and keeps the default
+    behaviour.
     """
     installed = {}
     if threading.current_thread() is threading.main_thread():
 
         def _handler(signum, frame):
             interrupted.append(signum)
+            if interrupt_times is not None:
+                interrupt_times.append(time.perf_counter())
 
         for name in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -321,9 +348,19 @@ class NamespaceBackend:
         )
         wall = time.perf_counter()
         interrupted = []
+        interrupt_times = []
         try:
-            with _signal_guard(interrupted):
-                return self._run_inner(spec, sandbox_dir, report, timings, marker, interrupted)
+            with _signal_guard(interrupted, interrupt_times):
+                return self._run_inner(
+                    spec,
+                    sandbox_dir,
+                    report,
+                    timings,
+                    marker,
+                    interrupted,
+                    run_id,
+                    interrupt_times,
+                )
         finally:
             timings["total"] = _ms(wall)
             report.timings_ms = timings
@@ -332,10 +369,15 @@ class NamespaceBackend:
             if report.sandbox_removed is None:
                 report.sandbox_removed = not sandbox_dir.exists()
 
-    def _run_inner(self, spec, sandbox_dir, report, timings, marker, interrupted):
+    def _run_inner(
+        self, spec, sandbox_dir, report, timings, marker, interrupted, run_id, interrupt_times
+    ):
         phase = time.perf_counter()
         try:
             (sandbox_dir / "rootfs").mkdir(parents=True)
+            (sandbox_dir / PROVENANCE_NAME).write_text(
+                run_id + "\n", encoding="utf-8"
+            )
         except OSError as exc:
             report.error = "prepare failed, " + str(exc)
             timings["prepare"] = _ms(phase)
@@ -351,7 +393,9 @@ class NamespaceBackend:
         token = secrets.token_hex(16)
         janitor = self._start_janitor(sandbox_dir, marker, token)
         try:
-            return self._run_supervised(spec, sandbox_dir, report, timings, interrupted)
+            return self._run_supervised(
+                spec, sandbox_dir, report, timings, interrupted, interrupt_times
+            )
         finally:
             if janitor is not None:
                 janitor_proc, janitor_fd = janitor
@@ -371,7 +415,7 @@ class NamespaceBackend:
                     except Exception:
                         pass
 
-    def _run_supervised(self, spec, sandbox_dir, report, timings, interrupted):
+    def _run_supervised(self, spec, sandbox_dir, report, timings, interrupted, interrupt_times):
         status_r, status_w = os.pipe()
         events = []
         argv = self._unshare_argv(spec, sandbox_dir, status_w)
@@ -438,15 +482,30 @@ class NamespaceBackend:
         ended_ts = None
         if "task_done" in by_name:
             done_receipt, done = by_name["task_done"]
-            report.outcome = "task"
-            if "signal" in done:
-                report.task_signal = int(done["signal"])
-            else:
-                report.task_exit_code = int(done["exit_code"])
             if started_ts is None:
                 started_ts = spawn
             ended_ts = done.get("ts", done_receipt)
             timings["task"] = round(max(0.0, ended_ts - started_ts) * 1000, 3)
+            # An interrupt received before the task done stamp
+            # makes the run a harness error even where the task
+            # done event reaches the runner only after the sandbox
+            # has been killed, and an interrupt received after the
+            # stamp leaves the task outcome standing. The stamps
+            # are compared, not the order the runner drained the
+            # events in, and MF-4 carries the rule.
+            sig_ts = interrupt_times[0] if interrupt_times else None
+            if interrupted and (sig_ts is None or sig_ts <= ended_ts):
+                report.error = (
+                    "the run was interrupted by signal "
+                    + str(interrupted[0])
+                    + " and the sandbox was torn down"
+                )
+            else:
+                report.outcome = "task"
+                if "signal" in done:
+                    report.task_signal = int(done["signal"])
+                else:
+                    report.task_exit_code = int(done["exit_code"])
         elif "start_error" in by_name:
             error_receipt, error_event = by_name["start_error"]
             report.error = error_event.get("detail", "the sandbox failed to start")

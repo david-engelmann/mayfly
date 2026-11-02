@@ -52,11 +52,25 @@ def _read_token():
 
 
 def _marker_carries_token(marker, token):
+    """Whether the marker carries exactly this run's token.
+
+    The read is bounded by a limit derived from the token
+    length, and a marker that runs past the limit is not the
+    clean marker whatever its first bytes say. Bytes that are
+    not valid text decode to replacement characters and fail
+    the comparison. A planted marker that is oversized or
+    undecodable therefore reads as a marker without the token,
+    and the sandbox is removed.
+    """
+    limit = len(token.encode("utf-8")) + 64
     try:
-        with open(marker, "r", encoding="utf-8") as handle:
-            return handle.read().strip() == token
+        with open(marker, "rb") as handle:
+            raw = handle.read(limit + 1)
     except OSError:
         return False
+    if len(raw) > limit:
+        return False
+    return raw.decode("utf-8", errors="replace").strip() == token
 
 
 def main(argv):
