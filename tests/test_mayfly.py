@@ -1735,6 +1735,67 @@ def test_the_runner_provenance_write_leaves_no_partial_file_behind(
     assert sorted(p.name for p in sandbox.iterdir()) == [".mayfly-provenance"]
 
 
+def test_a_supervisor_killed_inside_the_born_write_is_removed_by_the_janitor(
+    tmp_path,
+):
+    # The runner spawns the janitor before the born provenance
+    # write, so a supervisor killed inside that write already
+    # has a janitor watching the directory it leaves behind.
+    # This drives a real run in a child process with the born
+    # write replaced by one that opens the temporary file the
+    # real write opens and writes the same complete bytes and
+    # then hangs, and kills the child inside the write with
+    # the temporary file standing and no provenance landed.
+    # No later run is started, so no sweep can account for
+    # the directory going away, and the only layer left that
+    # can remove it is the janitor the run spawned before the
+    # write began. Against the order that wrote the provenance
+    # first, no janitor exists at the kill and the directory
+    # stands, and this pin fails on its wait.
+    import signal as signal_module
+
+    root = tmp_path / "root"
+    root.mkdir()
+    flag = tmp_path / "inside-the-write"
+    driver = (
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from mayfly.backends import namespace as ns\n"
+        "def dying_write(sandbox_dir, run_id):\n"
+        "    tmp = sandbox_dir / ('.mayfly-provenance.tmp-' + str(os.getpid()))\n"
+        "    tmp.write_text(run_id + '\\n', encoding='utf-8')\n"
+        "    Path(sys.argv[3]).write_text('inside', encoding='utf-8')\n"
+        "    time.sleep(120)\n"
+        "ns._write_provenance = dying_write\n"
+        "from mayfly import run_task\n"
+        "run_task([sys.executable, '-c', 'pass'], Path(sys.argv[2]))\n"
+    )
+    proc = subprocess.Popen(
+        [PY, "-c", driver, str(ROOT), str(root), str(flag)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait_until(flag.exists, 30)
+        standing = list(root.glob("run-*"))
+        assert len(standing) == 1
+        sandbox = standing[0]
+        assert list(sandbox.glob(".mayfly-provenance.tmp-*"))
+        assert not (sandbox / ".mayfly-provenance").exists()
+        proc.send_signal(signal_module.SIGKILL)
+        proc.wait(timeout=30)
+        assert _wait_until(lambda: not sandbox.exists(), 30), sandbox
+        assert _wait_until(
+            lambda: not namespace_module._pids_referencing(str(sandbox)), 30
+        )
+        assert list(root.iterdir()) == []
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=30)
+
+
 @requires_sandbox
 def test_a_run_killed_inside_prepare_leaves_nothing_unsweepable(tmp_path):
     import signal as signal_module

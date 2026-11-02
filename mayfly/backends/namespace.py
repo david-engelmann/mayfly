@@ -500,22 +500,42 @@ class NamespaceBackend:
         phase = time.perf_counter()
         try:
             (sandbox_dir / "rootfs").mkdir(parents=True)
-            _write_provenance(sandbox_dir, run_id)
         except OSError as exc:
             report.error = "prepare failed, " + str(exc)
             timings["prepare"] = _ms(phase)
             self._teardown(sandbox_dir, report, timings)
             return report
-        timings["prepare"] = _ms(phase)
-
-        if not self.unshare_path:
-            report.error = "unshare is not available on this machine"
-            self._teardown(sandbox_dir, report, timings)
-            return report
-
+        # The janitor is spawned here, as soon as the run
+        # directory exists and before the born provenance
+        # write, so a supervisor killed inside that write
+        # already has a janitor watching the directory it
+        # leaves behind. The janitor sleeps on its watch pipe
+        # with no deadline of its own, so the earlier spawn
+        # only lengthens its wait and its protocol is
+        # unchanged, and the cleanup in the finally below now
+        # also stands the janitor down on the prepare failure
+        # and the missing unshare paths, where no janitor
+        # existed before. The one segment no cleanup layer
+        # covers is the segment between the directory's
+        # creation above and this spawn, and MF-12 names what
+        # a death inside it can leave standing.
         token = secrets.token_hex(16)
         janitor = self._start_janitor(sandbox_dir, marker, token)
         try:
+            try:
+                _write_provenance(sandbox_dir, run_id)
+            except OSError as exc:
+                report.error = "prepare failed, " + str(exc)
+                timings["prepare"] = _ms(phase)
+                self._teardown(sandbox_dir, report, timings)
+                return report
+            timings["prepare"] = _ms(phase)
+
+            if not self.unshare_path:
+                report.error = "unshare is not available on this machine"
+                self._teardown(sandbox_dir, report, timings)
+                return report
+
             return self._run_supervised(
                 spec, sandbox_dir, report, timings, interrupted, interrupt_times
             )
