@@ -618,6 +618,18 @@ def _age_directory(path, seconds=60):
     os.utime(path, (old, old))
 
 
+def _let_the_run_get_under_way():
+    """Give a started run one clear moment before a pin acts on it.
+
+    The death pins are about a run whose task is under way and
+    whose started event has reached the runner. The task process
+    becomes visible a breath before the init writes that event, so
+    a pin that acts the instant the task appears can land inside
+    the breath and test a different scenario than it names.
+    """
+    time.sleep(1)
+
+
 def _plant_marker_and_sigkill(tmp_path, marker_content):
     import signal as signal_module
     import uuid
@@ -702,6 +714,7 @@ def test_a_sandbox_killed_mid_task_does_not_claim_the_task_never_started(tmp_pat
 
     marker = "mayfly-death-" + uuid.uuid4().hex
     proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    _let_the_run_get_under_way()
     sandboxes = list(tmp_path.glob("run-*"))
     assert len(sandboxes) == 1
     inits = _pids_running_script("_init.py", os.fsencode(str(sandboxes[0])))
@@ -739,6 +752,7 @@ def test_an_interrupted_run_reports_the_unfinished_task_phase_as_null(tmp_path):
 
     marker = "mayfly-death-" + uuid.uuid4().hex
     proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    _let_the_run_get_under_way()
     proc.send_signal(signal_module.SIGINT)
     out, _ = proc.communicate(timeout=30)
     assert proc.returncode == 125
