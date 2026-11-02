@@ -976,6 +976,14 @@ def test_the_contract_promises_no_more_than_the_provenance_check_holds():
     assert "written again by the init" in mf12
     assert "when its assembly of the prepared root begins" in mf12
     assert "lands whole or not at all" in mf12
+    # The residue window is the whole span before the born
+    # provenance write lands, and the narrow segment form
+    # the tenth repair widened must not stand as the whole
+    # of it, because a double kill after the spawn leaves
+    # the same unswept directory outside that segment.
+    assert "can leave an empty run directory that no sweep collects" not in mf12
+    assert "before the born provenance write lands" in mf12
+    assert "double kill that takes the janitor with the supervisor" in mf12
 
 
 def test_the_readme_cleanup_claim_carries_the_sweep_fallback():
@@ -986,6 +994,11 @@ def test_the_readme_cleanup_claim_carries_the_sweep_fallback():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "leaves no task running and no sandbox directory behind" not in readme
     assert "the next run under the same root sweeps the directory away" in readme
+    # The residue sentence is held to the widened window
+    # the tenth repair set in the contract, so the narrow
+    # instant on its own must not stand as the whole of it.
+    assert "killed in the instant its sandbox directory is created" not in readme
+    assert "killed before its provenance is written" in readme
 
 
 def test_the_contract_cleanup_claim_carries_the_layered_cleanup():
