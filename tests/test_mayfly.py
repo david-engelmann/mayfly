@@ -39,7 +39,7 @@ def test_run_report_carries_the_phases_and_the_outcome(tmp_path):
     assert "hello" in report.stdout_tail
     for phase in ("prepare", "start", "task", "teardown", "total"):
         assert phase in report.timings_ms, phase
-        assert report.timings_ms[phase] >= 0, phase
+        assert report.timings_ms[phase] > 0, phase
     assert report.timings_ms["task"] >= 200
     assert isinstance(report.proc_mounted, bool)
 
@@ -144,6 +144,7 @@ def test_the_environment_is_scrubbed_to_the_allowlist(tmp_path, monkeypatch):
         "PATH": "/usr/bin:/bin",
         "MAYFLY_KEEP_ME": "a kept value",
         "MAYFLY_SANDBOX": "namespace",
+        "PYTHONCOERCECLOCALE": "0",
     }
 
 
@@ -336,3 +337,251 @@ def test_contract_carries_the_round_one_obligations():
     assert "namespace sandbox" in text
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "namespace sandbox" in readme
+
+
+def test_the_stderr_tail_carries_a_failing_task_stderr(tmp_path):
+    script = "import sys; sys.stderr.write('a named failure line' + chr(10)); sys.exit(3)"
+    report = run_task([PY, "-c", script], tmp_path)
+    assert report.outcome == "task"
+    assert report.task_exit_code == 3
+    assert "a named failure line" in report.stderr_tail
+
+
+def test_a_python_task_sees_the_scrubbed_environment_through_its_interpreter(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("MAYFLY_LEAK_PROBE", "a secret value")
+    script = "import json, os; print(json.dumps(dict(os.environ)))"
+    report = run_task([PY, "-c", script], tmp_path)
+    seen = last_json(report)
+    assert seen == {
+        "PATH": "/usr/bin:/bin",
+        "MAYFLY_SANDBOX": "namespace",
+        "PYTHONCOERCECLOCALE": "0",
+    }
+
+
+def test_an_allowlisted_coercion_key_keeps_the_caller_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("PYTHONCOERCECLOCALE", "caller-chosen")
+    report = run_task(
+        ["/usr/bin/env"], tmp_path, allow_env=("PATH", "PYTHONCOERCECLOCALE")
+    )
+    seen = {}
+    for line in report.stdout_tail.strip().splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            seen[key] = value
+    assert seen["PYTHONCOERCECLOCALE"] == "caller-chosen"
+
+
+CAPS_SCRIPT = (
+    "import ctypes, json\n"
+    "libc = ctypes.CDLL(None, use_errno=True)\n"
+    "bounding = [cap for cap in range(64) if libc.prctl(23, cap, 0, 0, 0) == 1]\n"
+    "class Hdr(ctypes.Structure):\n"
+    "    _fields_ = [('version', ctypes.c_uint32), ('pid', ctypes.c_int)]\n"
+    "class Data(ctypes.Structure):\n"
+    "    _fields_ = [('effective', ctypes.c_uint32), ('permitted', ctypes.c_uint32), ('inheritable', ctypes.c_uint32)]\n"
+    "hdr = Hdr(0x20080522, 0)\n"
+    "data = (Data * 2)()\n"
+    "libc.capget(ctypes.byref(hdr), data)\n"
+    "print(json.dumps({\n"
+    "  'bounding': bounding,\n"
+    "  'effective': data[0].effective | (data[1].effective << 32),\n"
+    "  'permitted': data[0].permitted | (data[1].permitted << 32),\n"
+    "}))\n"
+)
+
+
+def test_the_task_holds_no_capabilities(tmp_path):
+    report = run_task([PY, "-c", CAPS_SCRIPT], tmp_path)
+    seen = last_json(report)
+    assert seen["bounding"] == []
+    assert seen["effective"] == 0
+    assert seen["permitted"] == 0
+
+
+ESCAPE_SCRIPT = (
+    "import json, os, sys\n"
+    "secret_path, host_target = sys.argv[1], sys.argv[2]\n"
+    "result = {'chroot_ok': False, 'secret_read': False, 'host_write': False}\n"
+    "os.makedirs('/work/trap', exist_ok=True)\n"
+    "root_fd = os.open('/', os.O_RDONLY)\n"
+    "try:\n"
+    "    os.chroot('/work/trap')\n"
+    "    result['chroot_ok'] = True\n"
+    "except OSError:\n"
+    "    pass\n"
+    "if result['chroot_ok']:\n"
+    "    os.fchdir(root_fd)\n"
+    "    for _ in range(24):\n"
+    "        os.chdir('..')\n"
+    "    try:\n"
+    "        os.chroot('.')\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "    try:\n"
+    "        with open(secret_path) as handle:\n"
+    "            result['secret_read'] = 'mayfly-host-secret' in handle.read()\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "    try:\n"
+    "        with open(host_target, 'w') as handle:\n"
+    "            handle.write('escaped')\n"
+    "        result['host_write'] = True\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "print(json.dumps(result))\n"
+)
+
+
+def test_the_chroot_climb_escape_shape_cannot_reach_the_host(tmp_path):
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("mayfly-host-secret", encoding="utf-8")
+    host_target = tmp_path / "escaped-write.txt"
+    report = run_task(
+        [PY, "-c", ESCAPE_SCRIPT, str(secret), str(host_target)], tmp_path
+    )
+    seen = last_json(report)
+    assert seen["chroot_ok"] is False
+    assert seen["secret_read"] is False
+    assert seen["host_write"] is False
+    assert not host_target.exists()
+
+
+def test_a_submount_of_a_bound_tree_is_read_only_inside(tmp_path):
+    import uuid
+
+    probe_dir = Path("/etc") / ("mayfly-subprobe-" + uuid.uuid4().hex[:12])
+    probe_dir.mkdir()
+    mounted = subprocess.run(
+        ["mount", "-t", "tmpfs", "tmpfs", str(probe_dir)],
+        capture_output=True,
+    ).returncode
+    if mounted != 0:
+        probe_dir.rmdir()
+        pytest.skip("this machine would not create a host submount to probe")
+    try:
+        script = (
+            "import json, os\n"
+            "errno = 0\n"
+            "try:\n"
+            "    handle = open(" + repr(str(probe_dir / "probe.txt")) + ", 'w')\n"
+            "    handle.close()\n"
+            "except OSError as exc:\n"
+            "    errno = exc.errno\n"
+            "print(json.dumps({'errno': errno}))\n"
+        )
+        report = run_task([PY, "-c", script], tmp_path)
+        assert report.outcome == "task"
+        assert last_json(report)["errno"] == 30
+        assert not (probe_dir / "probe.txt").exists()
+    finally:
+        subprocess.run(["umount", str(probe_dir)], capture_output=True)
+        probe_dir.rmdir()
+
+
+def test_a_command_with_a_nul_byte_is_a_harness_error(tmp_path):
+    report = run_task(["mayfly-bad\0command"], tmp_path)
+    assert report.outcome == "harness_error"
+    assert report.task_exit_code is None
+    assert report.error
+
+
+def test_a_prepare_failure_report_carries_the_full_shape(tmp_path):
+    blocker = tmp_path / "a-file-not-a-directory"
+    blocker.write_text("standing in the way", encoding="utf-8")
+    report = run_task([PY, "-c", "pass"], blocker)
+    assert report.outcome == "harness_error"
+    assert report.error
+    assert report.proc_mounted is False
+    assert isinstance(report.sandbox_removed, bool)
+    for phase in ("prepare", "start", "task", "teardown", "total"):
+        assert phase in report.timings_ms, phase
+
+
+def test_a_large_task_output_is_bounded_to_its_tail(tmp_path):
+    from mayfly.backends.namespace import TAIL_CHARS
+
+    script = (
+        "import sys\n"
+        "sys.stdout.write('x' * 300000)\n"
+        "sys.stdout.write('the-end-marker')\n"
+    )
+    report = run_task([PY, "-c", script], tmp_path)
+    assert report.outcome == "task"
+    assert len(report.stdout_tail) <= TAIL_CHARS
+    assert report.stdout_tail.endswith("the-end-marker")
+
+
+def _host_pids_with_marker(marker):
+    pids = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            cmdline = Path("/proc", entry, "cmdline").read_bytes()
+        except OSError:
+            continue
+        if marker.encode() in cmdline:
+            pids.append(int(entry))
+    return pids
+
+
+def _wait_until(predicate, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.1)
+    return predicate()
+
+
+def _start_cli_with_sleeping_task(root, marker):
+    script = "import time\n# " + marker + "\ntime.sleep(60)\n"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT)
+    proc = subprocess.Popen(
+        [PY, "-m", "mayfly", "run", "--root", str(root), "--", PY, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+        env=env,
+    )
+    started = _wait_until(
+        lambda: len(_host_pids_with_marker(marker)) >= 4 and list(root.glob("run-*")),
+        30,
+    )
+    assert started, "the sleeping task never came up"
+    return proc
+
+
+def test_sigterm_to_the_supervisor_still_tears_the_sandbox_down(tmp_path):
+    import signal as signal_module
+    import uuid
+
+    marker = "mayfly-death-" + uuid.uuid4().hex
+    proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    proc.send_signal(signal_module.SIGTERM)
+    out, _ = proc.communicate(timeout=30)
+    assert proc.returncode == 125
+    payload = json.loads(out)
+    assert payload["outcome"] == "harness_error"
+    assert _wait_until(lambda: not _host_pids_with_marker(marker), 15)
+    assert list(tmp_path.glob("run-*")) == []
+
+
+def test_sigkill_to_the_supervisor_leaves_no_process_and_no_sandbox(tmp_path):
+    import signal as signal_module
+    import uuid
+
+    marker = "mayfly-death-" + uuid.uuid4().hex
+    proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    proc.send_signal(signal_module.SIGKILL)
+    proc.wait(timeout=30)
+    assert _wait_until(lambda: not _host_pids_with_marker(marker), 30)
+    assert _wait_until(lambda: list(tmp_path.glob("run-*")) == [], 30)
+    assert list(tmp_path.glob(".mayfly-clean-*")) == []

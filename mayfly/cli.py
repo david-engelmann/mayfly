@@ -11,8 +11,7 @@ import argparse
 import json
 import sys
 
-from .backends.base import HarnessError
-from .backends.namespace import HARNESS_EXIT_CODE
+from .backends.base import HARNESS_EXIT_CODE, HarnessError
 from .runner import run_task
 
 
@@ -43,8 +42,6 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.subcommand != "run":
-        return 2
     command = list(args.command)
     if command and command[0] == "--":
         command = command[1:]

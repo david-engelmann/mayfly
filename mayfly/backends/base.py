@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+HARNESS_EXIT_CODE = 125
+
+
 class HarnessError(Exception):
     """The harness failed before or around the task, not in the task."""
 
