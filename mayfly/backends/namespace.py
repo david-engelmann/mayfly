@@ -13,9 +13,13 @@ The unshare process is spawned with a parent death signal, so a
 supervisor killed outright takes the sandbox tree down with it,
 and the init arms the same signal against unshare. A janitor
 process watches each run and removes the sandbox directory when
-the supervisor dies without removing it. A supervisor interrupted
-by SIGTERM or SIGINT still tears the sandbox down and reports the
-run as a harness error.
+the supervisor dies without removing it, and it trusts only a
+clean marker carrying the per run token it was handed over its
+standard input at spawn. A run also sweeps orphaned sandbox
+directories left under its root by runs whose supervisor and
+janitor both died, before it prepares its own. A supervisor
+interrupted by SIGTERM or SIGINT still tears the sandbox down
+and reports the run as a harness error.
 
 This backend is a Linux namespace sandbox. It is not a micro-VM
 and nothing in this repo calls it one.
@@ -24,6 +28,7 @@ and nothing in this repo calls it one.
 import ctypes
 import json
 import os
+import secrets
 import shutil
 import signal
 import subprocess
@@ -100,6 +105,81 @@ def _drain_stream(stream, tail):
             tail.feed(chunk)
     except (OSError, ValueError):
         return
+
+
+ORPHAN_GRACE_SECONDS = 5.0
+
+
+def _pids_referencing(path_text):
+    """Host pids whose command line names the given path.
+
+    A live run always has processes that name its sandbox
+    directory, the janitor through its sandbox argument and the
+    init through its rootfs argument, so a sandbox directory no
+    live process names belongs to a run that is over.
+    """
+    needle = os.fsencode(path_text)
+    found = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == os.getpid():
+            continue
+        try:
+            with open(os.path.join("/proc", entry, "cmdline"), "rb") as handle:
+                cmdline = handle.read()
+        except OSError:
+            continue
+        if needle in cmdline:
+            found.append(pid)
+    return found
+
+
+def _sweep_orphans(root):
+    """Remove sandbox directories under root whose runs are dead.
+
+    A directory is swept only when it is older than the grace
+    period, so a run still being prepared by a concurrent process
+    is never touched, and only when no live process names it, so
+    a live run of any age keeps its sandbox. A clean marker whose
+    run directory is already gone is swept on the same terms. A
+    sweep failure never breaks the run that triggered it.
+    """
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    now = time.time()
+    for entry in entries:
+        try:
+            if entry.is_dir() and entry.name.startswith("run-"):
+                if now - entry.stat().st_mtime < ORPHAN_GRACE_SECONDS:
+                    continue
+                if _pids_referencing(str(entry)):
+                    continue
+                shutil.rmtree(entry, ignore_errors=True)
+                marker = root / (".mayfly-clean-" + entry.name[len("run-"):])
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass
+            elif entry.is_file() and entry.name.startswith(".mayfly-clean-"):
+                run_dir = root / ("run-" + entry.name[len(".mayfly-clean-"):])
+                if run_dir.exists():
+                    continue
+                if now - entry.stat().st_mtime < ORPHAN_GRACE_SECONDS:
+                    continue
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            continue
 
 
 @contextmanager
@@ -183,7 +263,7 @@ class NamespaceBackend:
         argv += list(spec.command)
         return argv
 
-    def _start_janitor(self, sandbox_dir, marker):
+    def _start_janitor(self, sandbox_dir, marker, token):
         read_fd, write_fd = os.pipe()
         janitor_path = Path(__file__).resolve().parent.parent / "_janitor.py"
         try:
@@ -198,7 +278,7 @@ class NamespaceBackend:
                     "--fd",
                     str(read_fd),
                 ],
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 pass_fds=(read_fd,),
@@ -209,6 +289,15 @@ class NamespaceBackend:
             os.close(write_fd)
             return None
         os.close(read_fd)
+        # The token reaches the janitor over its standard input,
+        # never over its command line, so neither a directory
+        # listing nor a process listing reveals it. A janitor that
+        # never receives it authenticates nothing and cleans up.
+        try:
+            proc.stdin.write((token + "\n").encode("utf-8"))
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
         return (proc, write_fd)
 
     def _teardown(self, sandbox_dir, report, timings, since=None):
@@ -218,7 +307,8 @@ class NamespaceBackend:
         timings["teardown"] = round((time.perf_counter() - phase) * 1000, 3)
 
     def run(self, spec):
-        timings = {name: 0.0 for name in PHASES}
+        _sweep_orphans(Path(spec.root))
+        timings = {name: None for name in PHASES}
         run_id = uuid.uuid4().hex[:12]
         sandbox_dir = Path(spec.root) / ("run-" + run_id)
         marker = Path(spec.root) / (".mayfly-clean-" + run_id)
@@ -258,7 +348,8 @@ class NamespaceBackend:
             self._teardown(sandbox_dir, report, timings)
             return report
 
-        janitor = self._start_janitor(sandbox_dir, marker)
+        token = secrets.token_hex(16)
+        janitor = self._start_janitor(sandbox_dir, marker, token)
         try:
             return self._run_supervised(spec, sandbox_dir, report, timings, interrupted)
         finally:
@@ -267,7 +358,7 @@ class NamespaceBackend:
                 clean = bool(report.sandbox_removed)
                 if clean:
                     try:
-                        marker.write_text("clean", encoding="utf-8")
+                        marker.write_text(token + "\n", encoding="utf-8")
                     except OSError:
                         pass
                 try:
@@ -298,7 +389,6 @@ class NamespaceBackend:
             os.close(status_r)
             os.close(status_w)
             report.error = "could not launch unshare, " + str(exc)
-            timings["start"] = _ms(spawn)
             self._teardown(sandbox_dir, report, timings)
             return report
         os.close(status_w)
@@ -331,7 +421,6 @@ class NamespaceBackend:
             except OSError:
                 pass
             status_reader.join(timeout=5)
-        exited = time.perf_counter()
 
         report.stdout_tail = out_tail.text()
         report.stderr_tail = err_tail.text()
@@ -341,6 +430,11 @@ class NamespaceBackend:
             by_name.setdefault(event.get("event"), (receipt_ts, event))
         if "ready" in by_name:
             report.proc_mounted = bool(by_name["ready"][1].get("proc_mounted"))
+        started_ts = None
+        if "started" in by_name:
+            started_receipt, started = by_name["started"]
+            started_ts = started.get("ts", started_receipt)
+            timings["start"] = round(max(0.0, started_ts - spawn) * 1000, 3)
         ended_ts = None
         if "task_done" in by_name:
             done_receipt, done = by_name["task_done"]
@@ -349,16 +443,14 @@ class NamespaceBackend:
                 report.task_signal = int(done["signal"])
             else:
                 report.task_exit_code = int(done["exit_code"])
-            started_receipt, started = by_name.get("started", (spawn, {}))
-            started_ts = started.get("ts", started_receipt)
+            if started_ts is None:
+                started_ts = spawn
             ended_ts = done.get("ts", done_receipt)
-            timings["start"] = round(max(0.0, started_ts - spawn) * 1000, 3)
             timings["task"] = round(max(0.0, ended_ts - started_ts) * 1000, 3)
         elif "start_error" in by_name:
             error_receipt, error_event = by_name["start_error"]
             report.error = error_event.get("detail", "the sandbox failed to start")
             ended_ts = error_event.get("ts", error_receipt)
-            timings["start"] = round((exited - spawn) * 1000, 3)
         else:
             if interrupted:
                 report.error = (
@@ -367,13 +459,18 @@ class NamespaceBackend:
                     + " and the sandbox was torn down"
                 )
             else:
-                detail = "the sandbox exited without starting the task"
+                if "started" in by_name:
+                    detail = (
+                        "the sandbox exited after the task started, "
+                        "and no task end was reported"
+                    )
+                else:
+                    detail = "the sandbox exited without starting the task"
                 if proc.returncode:
                     detail += ", unshare exit " + str(proc.returncode)
                 if report.stderr_tail.strip():
                     detail += ", sandbox stderr tail, " + report.stderr_tail.strip()[-300:]
                 report.error = detail
-            timings["start"] = round((exited - spawn) * 1000, 3)
 
         self._teardown(sandbox_dir, report, timings, since=ended_ts)
         if not report.sandbox_removed:

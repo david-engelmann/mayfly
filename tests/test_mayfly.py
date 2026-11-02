@@ -585,3 +585,168 @@ def test_sigkill_to_the_supervisor_leaves_no_process_and_no_sandbox(tmp_path):
     assert _wait_until(lambda: not _host_pids_with_marker(marker), 30)
     assert _wait_until(lambda: list(tmp_path.glob("run-*")) == [], 30)
     assert list(tmp_path.glob(".mayfly-clean-*")) == []
+
+
+def _pids_running_script(script_name, extra_needle=None):
+    """Pids running a mayfly helper script as their own program.
+
+    The script must be the second word of the command line, the
+    program the process was started with, because the unshare
+    process also names the init script further along its own
+    command line without being the init.
+    """
+    pids = []
+    tail = os.fsencode("/" + script_name)
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            cmdline = Path("/proc", entry, "cmdline").read_bytes()
+        except OSError:
+            continue
+        parts = cmdline.split(b"\0")
+        if len(parts) < 2 or not parts[1].endswith(tail):
+            continue
+        if extra_needle is not None and extra_needle not in cmdline:
+            continue
+        pids.append(int(entry))
+    return pids
+
+
+def _age_directory(path, seconds=60):
+    old = time.time() - seconds
+    os.utime(path, (old, old))
+
+
+def _plant_marker_and_sigkill(tmp_path, marker_content):
+    import signal as signal_module
+    import uuid
+
+    marker = "mayfly-death-" + uuid.uuid4().hex
+    proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    sandboxes = list(tmp_path.glob("run-*"))
+    assert len(sandboxes) == 1
+    run_id = sandboxes[0].name[len("run-"):]
+    planted = tmp_path / (".mayfly-clean-" + run_id)
+    planted.write_text(marker_content, encoding="utf-8")
+    proc.send_signal(signal_module.SIGKILL)
+    proc.wait(timeout=30)
+    assert _wait_until(lambda: not _host_pids_with_marker(marker), 30)
+    assert _wait_until(lambda: list(tmp_path.glob("run-*")) == [], 30)
+    assert list(tmp_path.glob(".mayfly-clean-*")) == []
+
+
+def test_a_planted_clean_marker_does_not_stand_the_janitor_down(tmp_path):
+    _plant_marker_and_sigkill(tmp_path, "planted by anyone who can list the root\n")
+
+
+def test_a_forged_token_in_a_planted_marker_does_not_stand_the_janitor_down(tmp_path):
+    _plant_marker_and_sigkill(tmp_path, "0" * 32 + "\n")
+
+
+def test_a_clean_run_leaves_no_marker_and_no_sandbox(tmp_path):
+    report = run_task([PY, "-c", "print('done')"], tmp_path)
+    assert report.outcome == "task"
+    assert report.sandbox_removed is True
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_later_run_sweeps_an_orphan_whose_janitor_also_died(tmp_path):
+    import signal as signal_module
+    import uuid
+
+    marker = "mayfly-death-" + uuid.uuid4().hex
+    proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    sandboxes = list(tmp_path.glob("run-*"))
+    assert len(sandboxes) == 1
+    sandbox = sandboxes[0]
+    janitors = _pids_running_script("_janitor.py", os.fsencode(str(sandbox)))
+    assert len(janitors) == 1
+    os.kill(janitors[0], signal_module.SIGKILL)
+    proc.send_signal(signal_module.SIGKILL)
+    proc.wait(timeout=30)
+    assert _wait_until(lambda: not _host_pids_with_marker(marker), 30)
+    assert sandbox.exists()
+    _age_directory(sandbox)
+    report = run_task([PY, "-c", "pass"], tmp_path)
+    assert report.outcome == "task"
+    assert not sandbox.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_sweep_never_touches_a_live_run(tmp_path):
+    import signal as signal_module
+    import uuid
+
+    marker = "mayfly-death-" + uuid.uuid4().hex
+    proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    sandboxes = list(tmp_path.glob("run-*"))
+    assert len(sandboxes) == 1
+    sandbox = sandboxes[0]
+    _age_directory(sandbox)
+    report = run_task([PY, "-c", "pass"], tmp_path)
+    assert report.outcome == "task"
+    assert sandbox.exists()
+    assert _host_pids_with_marker(marker)
+    proc.send_signal(signal_module.SIGTERM)
+    out, _ = proc.communicate(timeout=30)
+    assert proc.returncode == 125
+    assert json.loads(out)["outcome"] == "harness_error"
+    assert _wait_until(lambda: not _host_pids_with_marker(marker), 15)
+    assert list(tmp_path.glob("run-*")) == []
+
+
+def test_a_sandbox_killed_mid_task_does_not_claim_the_task_never_started(tmp_path):
+    import signal as signal_module
+    import uuid
+
+    marker = "mayfly-death-" + uuid.uuid4().hex
+    proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    sandboxes = list(tmp_path.glob("run-*"))
+    assert len(sandboxes) == 1
+    inits = _pids_running_script("_init.py", os.fsencode(str(sandboxes[0])))
+    assert len(inits) == 1
+    os.kill(inits[0], signal_module.SIGKILL)
+    out, _ = proc.communicate(timeout=30)
+    assert proc.returncode == 125
+    payload = json.loads(out)
+    assert payload["outcome"] == "harness_error"
+    assert "without starting the task" not in payload["error"]
+    assert "after the task started" in payload["error"]
+    assert payload["timings_ms"]["task"] is None
+    assert _wait_until(lambda: not _host_pids_with_marker(marker), 15)
+    assert list(tmp_path.glob("run-*")) == []
+
+
+def test_a_sandbox_that_dies_before_the_task_starts_keeps_the_plain_report(tmp_path):
+    fake_unshare = tmp_path / "fake-unshare"
+    fake_unshare.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    fake_unshare.chmod(0o755)
+    root = tmp_path / "root"
+    backend = NamespaceBackend(unshare_path=str(fake_unshare))
+    report = backend.run(RunSpec(command=[PY, "-c", "pass"], root=root))
+    assert report.outcome == "harness_error"
+    assert "without starting the task" in report.error
+    assert report.timings_ms["start"] is None
+    assert report.timings_ms["task"] is None
+    assert report.sandbox_removed is True
+    assert list(root.iterdir()) == []
+
+
+def test_an_interrupted_run_reports_the_unfinished_task_phase_as_null(tmp_path):
+    import signal as signal_module
+    import uuid
+
+    marker = "mayfly-death-" + uuid.uuid4().hex
+    proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    proc.send_signal(signal_module.SIGINT)
+    out, _ = proc.communicate(timeout=30)
+    assert proc.returncode == 125
+    payload = json.loads(out)
+    assert payload["outcome"] == "harness_error"
+    assert payload["timings_ms"]["task"] is None
+    assert payload["timings_ms"]["start"] > 0
+    assert payload["timings_ms"]["teardown"] > 0
+    assert payload["timings_ms"]["total"] > 0
+    assert _wait_until(lambda: not _host_pids_with_marker(marker), 15)
+    assert list(tmp_path.glob("run-*")) == []
