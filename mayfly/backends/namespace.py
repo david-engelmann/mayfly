@@ -123,7 +123,11 @@ def _pids_referencing(path_text):
     also when it lists but not one command line in it can be
     read, because a table that cannot be read in substance says
     nothing about which runs are live and must never read as an
-    empty one.
+    empty one. A read that fails because the process vanished
+    between the listing and the read is ordinary and is passed
+    over. A read refused for any other reason also makes the
+    answer None, because the one entry withheld may be the one
+    that names the path.
     """
     needle = os.fsencode(path_text)
     found = []
@@ -141,8 +145,10 @@ def _pids_referencing(path_text):
         try:
             with open(os.path.join("/proc", entry, "cmdline"), "rb") as handle:
                 cmdline = handle.read()
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError:
+            return None
         reads += 1
         if needle in cmdline:
             found.append(pid)
@@ -204,10 +210,13 @@ def _read_provenance(entry):
 def _sweep_orphans(root):
     """Remove sandbox directories under root whose runs are dead.
 
-    A directory is swept only when the provenance file the
-    runner wrote inside it at creation names the same run id as
-    the directory itself, so a directory mayfly did not create
-    is never swept however it is named, and only when it is
+    A directory is swept only when the provenance file inside
+    it names the same run id as the directory itself, so the
+    sweep can tell the directories mayfly created from any
+    other directory carrying the same name shape, an
+    identification that guards against accidental collision
+    and name confusion and is not authentication and no
+    boundary against a writer to the run root, and only when it is
     older than the grace period, so a run still being prepared
     by a concurrent process is never touched, and only when no
     live process names it, so a live run of any age keeps its
@@ -516,7 +525,7 @@ class NamespaceBackend:
                 env=self._task_env(spec),
                 preexec_fn=_arm_death_signal,
             )
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, TypeError) as exc:
             os.close(status_r)
             os.close(status_w)
             report.error = "could not launch unshare, " + str(exc)

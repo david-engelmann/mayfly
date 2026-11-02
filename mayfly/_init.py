@@ -45,7 +45,7 @@ AT_FDCWD = -100
 AT_RECURSIVE = 0x8000
 MOUNT_ATTR_RDONLY = 0x0001
 SYS_PIVOT_ROOT = {"x86_64": 155, "aarch64": 41}
-SYS_MOUNT_SETATTR = {"x86_64": 442, "aarch64": 444}
+SYS_MOUNT_SETATTR = {"x86_64": 442, "aarch64": 442}
 
 RESERVED_EXIT = 125
 HOSTNAME = "mayfly"
@@ -136,11 +136,44 @@ def assemble_root(rootfs):
             open(target, "a").close()
         _mount("/dev/" + name, target, None, MS_BIND)
     _mount("tmpfs", os.path.join(rootfs, "work"), "tmpfs", 0)
+    proc_mounted = True
     try:
         _mount("proc", os.path.join(rootfs, "proc"), "proc", 0)
     except OSError:
-        return False
-    return True
+        proc_mounted = False
+    _write_provenance(rootfs)
+    return proc_mounted
+
+
+def _write_provenance(rootfs):
+    """Write the run provenance beside the prepared root.
+
+    The runner writes the provenance file when it creates the
+    sandbox directory, and that copy is what the orphan sweep
+    trusts. A janitor whose supervisor was killed can remove
+    the whole directory while this assembly is still under
+    way, and the assembly then recreates the rootfs shape on
+    the same path, so a skeleton left that way carried no
+    provenance and no sweep would ever collect it. The init
+    therefore writes the provenance again when its creation
+    work is done, naming the run the directory name already
+    carries, so any residue this assembly leaves stands under
+    the provenance it was born with. A failure to write it is
+    swallowed, because the runner copy may still stand and a
+    missing provenance must never fail a run whose sandbox is
+    otherwise sound.
+    """
+    sandbox = os.path.dirname(os.path.abspath(rootfs))
+    name = os.path.basename(sandbox)
+    if not name.startswith("run-"):
+        return
+    try:
+        with open(
+            os.path.join(sandbox, ".mayfly-provenance"), "w", encoding="utf-8"
+        ) as handle:
+            handle.write(name[len("run-"):] + "\n")
+    except OSError:
+        pass
 
 
 def enter_root(rootfs):

@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from mayfly import HarnessError, run_task
 from mayfly.backends import namespace as namespace_module
-from mayfly.backends.base import RunSpec
+from mayfly.backends.base import RunReport, RunSpec
 from mayfly.backends.namespace import NamespaceBackend
 
 pytestmark = pytest.mark.skipif(
@@ -30,21 +30,50 @@ PY = sys.executable
 FORCE_REFUSAL_SWITCH = "MAYFLY_TEST_FORCE_SANDBOX_REFUSAL"
 
 
+def _probe_failure_is_host_refusal(report):
+    """Whether a failed probe run is the host refusing the sandbox.
+
+    The refusal this guards against is the one the integration
+    host presents, where unshare cannot write the user
+    namespace id map and the sandbox never starts, or where
+    unshare cannot run at all. The signature is the failure
+    naming that refusal. A failure naming anything else means
+    the namespace machinery started and something in the
+    sandbox broke, which is a defect in the slice and not a
+    property of the host.
+    """
+    text = " ".join(
+        part for part in (report.error, report.stderr_tail) if part
+    ).lower()
+    if "uid_map" in text:
+        return True
+    if "unshare" in text and (
+        "not permitted" in text or "permission denied" in text
+    ):
+        return True
+    return False
+
+
 def _probe_sandbox():
     """Ask whether this host can start a real sandbox at all.
 
     One trivial task runs through the real backend. Where the
     run ends in a task outcome the host can start a sandbox and
     the answer is (True, an empty refusal). Where it does not,
-    the answer is (False, the refusal the failed run reported),
-    so a skip reason names the refusal the host actually gave,
-    the uid map refusal on a host that forbids the user
-    namespace mapping above all. A suite that cannot tell a
-    host that forbids the sandbox from a sandbox that is broken
-    fails wholesale on the first kind of host and says nothing
-    true about either. The MAYFLY_TEST_FORCE_SANDBOX_REFUSAL
-    switch is a test only hook that forces the refusal answer,
-    so the guards below can be shown to fire.
+    the failure is classified. A failure carrying the host
+    refusal signature answers (False, the refusal the failed
+    run reported), so a skip reason names the refusal the host
+    actually gave, the uid map refusal on a host that forbids
+    the user namespace mapping above all. Any other failure
+    raises, because a probe that took it for a refusal would
+    skip the guarded suite green over a broken sandbox, in
+    this environment and in continuous integration alike. A
+    suite that cannot tell a host that forbids the sandbox
+    from a sandbox that is broken fails wholesale on the first
+    kind of host and says nothing true about either. The
+    MAYFLY_TEST_FORCE_SANDBOX_REFUSAL switch is a test only
+    hook that forces the refusal answer, so the guards below
+    can be shown to fire.
     """
     if os.environ.get(FORCE_REFUSAL_SWITCH):
         return False, "the probe was forced to report a refusal by " + FORCE_REFUSAL_SWITCH
@@ -58,7 +87,13 @@ def _probe_sandbox():
     refusal = " ".join(
         part for part in (report.error, report.stderr_tail) if part
     ).strip()
-    return False, refusal or "the sandbox did not start and gave no reason"
+    if _probe_failure_is_host_refusal(report):
+        return False, refusal or "the sandbox did not start and gave no reason"
+    raise AssertionError(
+        "the sandbox probe failed for a reason that is not a host refusal, "
+        "so the guarded tests would be skipped over a broken sandbox, "
+        + (refusal or "the failed run gave no reason")
+    )
 
 
 _SANDBOX_OK, _SANDBOX_REFUSAL = _probe_sandbox()
@@ -67,6 +102,74 @@ requires_sandbox = pytest.mark.skipif(
     not _SANDBOX_OK,
     reason="this host refuses to start a sandbox, " + _SANDBOX_REFUSAL,
 )
+
+
+def _synthetic_probe_report(error=None, stderr_tail=""):
+    return RunReport(
+        backend="namespace",
+        run_id="probe0000000",
+        sandbox_dir="/nonexistent",
+        command=[PY, "-c", "pass"],
+        outcome="harness_error",
+        error=error,
+        stderr_tail=stderr_tail,
+    )
+
+
+def test_the_probe_takes_the_uid_map_refusal_for_a_host_refusal():
+    report = _synthetic_probe_report(
+        error="the sandbox exited without starting the task, unshare exit 1",
+        stderr_tail=(
+            "unshare: write failed /proc/self/uid_map: Operation not permitted"
+        ),
+    )
+    assert _probe_failure_is_host_refusal(report) is True
+    report = _synthetic_probe_report(
+        error="could not launch unshare, [Errno 13] Permission denied"
+    )
+    assert _probe_failure_is_host_refusal(report) is True
+
+
+def test_the_probe_takes_any_other_failure_for_a_broken_sandbox():
+    broken_shapes = [
+        _synthetic_probe_report(
+            error=(
+                "the prepared root failed, "
+                "[Errno 2] No such file or directory: '/probe/rootfs'"
+            )
+        ),
+        _synthetic_probe_report(
+            error="could not launch unshare, [Errno 2] No such file or directory"
+        ),
+        _synthetic_probe_report(
+            error="the sandbox exited without starting the task, unshare exit 1",
+            stderr_tail="the init died on a name the driver never sent",
+        ),
+        _synthetic_probe_report(),
+    ]
+    for report in broken_shapes:
+        assert _probe_failure_is_host_refusal(report) is False, report.error
+
+
+def test_the_probe_skips_on_a_refusal_and_fails_loudly_on_a_break(monkeypatch):
+    monkeypatch.delenv(FORCE_REFUSAL_SWITCH, raising=False)
+    module = sys.modules[__name__]
+    refusal = _synthetic_probe_report(
+        error="the sandbox exited without starting the task, unshare exit 1",
+        stderr_tail=(
+            "unshare: write failed /proc/self/uid_map: Operation not permitted"
+        ),
+    )
+    monkeypatch.setattr(module, "run_task", lambda command, root: refusal)
+    ok, reason = _probe_sandbox()
+    assert ok is False
+    assert "uid_map" in reason
+    broken = _synthetic_probe_report(
+        error="the prepared root failed, [Errno 2] No such file or directory"
+    )
+    monkeypatch.setattr(module, "run_task", lambda command, root: broken)
+    with pytest.raises(AssertionError):
+        _probe_sandbox()
 
 
 def last_json(report):
@@ -845,17 +948,32 @@ def test_an_interrupted_run_reports_the_unfinished_task_phase_as_null(tmp_path):
 
 def test_the_supported_architectures_are_the_documented_ones():
     init_source = (ROOT / "mayfly" / "_init.py").read_text(encoding="utf-8")
-    for table in ("SYS_PIVOT_ROOT", "SYS_MOUNT_SETATTR"):
+    expected = {
+        "SYS_PIVOT_ROOT": {"x86_64": 155, "aarch64": 41},
+        "SYS_MOUNT_SETATTR": {"x86_64": 442, "aarch64": 442},
+    }
+    for table, numbers in expected.items():
         line = next(
             line for line in init_source.splitlines() if line.startswith(table)
         )
-        keys = set(re.findall(r'"([a-z0-9_]+)":', line))
-        assert keys == {"x86_64", "aarch64"}, table
+        found = {
+            name: int(value)
+            for name, value in re.findall(r'"([a-z0-9_]+)":\s*(\d+)', line)
+        }
+        assert found == numbers, table
     contract = (ROOT / "CONTRACT.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     for arch in ("x86_64", "aarch64"):
         assert arch in contract
         assert arch in readme
+
+
+def test_the_contract_promises_no_more_than_the_provenance_check_holds():
+    contract = (ROOT / "CONTRACT.md").read_text(encoding="utf-8")
+    mf12 = contract[contract.index("Obligation MF-12 covers"):]
+    assert "never swept however it is named" not in mf12
+    assert "it is not authentication" in mf12
+    assert "written again by the init" in mf12
 
 
 def _drive_janitor(sandbox, marker, token):
@@ -1138,6 +1256,77 @@ def test_the_sweep_reads_a_table_it_cannot_read_at_all_as_unknown(
         sleeper.wait(timeout=15)
 
 
+def test_the_sweep_reads_a_refused_cmdline_as_unknown_liveness(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    planted = root / "run-eeee00000006"
+    planted.mkdir(parents=True)
+    (planted / ".mayfly-provenance").write_text("eeee00000006\n", encoding="utf-8")
+    _age_directory(planted)
+    sleeper = subprocess.Popen(
+        [PY, "-c", "import time; time.sleep(60)", str(planted)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait_until(
+            lambda: sleeper.pid in (namespace_module._pids_referencing(str(planted)) or []),
+            15,
+        )
+        real_open = open
+
+        def withholding_open(path, *args, **kwargs):
+            text = os.fspath(path) if isinstance(path, (str, os.PathLike)) else ""
+            if text == "/proc/" + str(sleeper.pid) + "/cmdline":
+                raise PermissionError("the command line read was refused")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(namespace_module, "open", withholding_open, raising=False)
+        assert namespace_module._pids_referencing(str(planted)) is None
+        namespace_module._sweep_orphans(root)
+        assert planted.exists()
+    finally:
+        sleeper.terminate()
+        sleeper.wait(timeout=15)
+
+
+def test_a_vanished_process_does_not_make_liveness_unknown(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    planted = root / "run-eeee00000007"
+    planted.mkdir(parents=True)
+    (planted / ".mayfly-provenance").write_text("eeee00000007\n", encoding="utf-8")
+    sleeper = subprocess.Popen(
+        [PY, "-c", "import time; time.sleep(60)", str(planted)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait_until(
+            lambda: sleeper.pid in (namespace_module._pids_referencing(str(planted)) or []),
+            15,
+        )
+        real_open = open
+
+        def vanishing_open(path, *args, **kwargs):
+            text = os.fspath(path) if isinstance(path, (str, os.PathLike)) else ""
+            if (
+                text.startswith("/proc/")
+                and text.endswith("/cmdline")
+                and str(sleeper.pid) not in text
+            ):
+                raise FileNotFoundError("the process vanished mid scan")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(namespace_module, "open", vanishing_open, raising=False)
+        found = namespace_module._pids_referencing(str(planted))
+        assert found is not None
+        assert sleeper.pid in found
+    finally:
+        sleeper.terminate()
+        sleeper.wait(timeout=15)
+
+
 FAKE_UNSHARE = """#!/usr/bin/env python3
 import json
 import os
@@ -1178,11 +1367,29 @@ else:
 """
 
 
-def _start_cli_with_fake_unshare(root, fakebin, mode):
+def _fake_unshare_text():
+    """The fake unshare script with this interpreter in its shebang.
+
+    The backend scrubs PATH out of the environment the fake
+    runs with, so a shebang that searches for the interpreter
+    by name depends on the host keeping one on the default
+    search path. The sibling helpers run their scripts through
+    this interpreter directly, and the fake names it outright
+    for the same reason.
+    """
+    return FAKE_UNSHARE.replace("#!/usr/bin/env python3", "#!" + PY, 1)
+
+
+def _write_fake_unshare(fakebin):
     fakebin.mkdir(parents=True, exist_ok=True)
     fake = fakebin / "unshare"
-    fake.write_text(FAKE_UNSHARE, encoding="utf-8")
+    fake.write_text(_fake_unshare_text(), encoding="utf-8")
     fake.chmod(0o755)
+    return fake
+
+
+def _start_cli_with_fake_unshare(root, fakebin, mode):
+    _write_fake_unshare(fakebin)
     env = dict(os.environ)
     env["PYTHONPATH"] = str(ROOT)
     env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
@@ -1208,6 +1415,12 @@ def _start_cli_with_fake_unshare(root, fakebin, mode):
         cwd=ROOT,
         env=env,
     )
+
+
+def test_the_fake_unshare_names_this_interpreter_in_its_shebang(tmp_path):
+    fake = _write_fake_unshare(tmp_path / "fakebin")
+    first_line = fake.read_text(encoding="utf-8").splitlines()[0]
+    assert first_line == "#!" + PY
 
 
 def test_an_interrupt_before_the_task_done_stamp_is_a_harness_error(tmp_path):
@@ -1249,5 +1462,151 @@ def test_an_interrupt_after_the_task_done_stamp_keeps_the_task_outcome(tmp_path)
     payload = json.loads(out)
     assert payload["outcome"] == "task"
     assert payload["task_exit_code"] == 0
+    assert list(root.glob("run-*")) == []
+    assert list(root.glob(".mayfly-clean-*")) == []
+
+
+def test_a_command_with_a_none_element_is_a_harness_error(tmp_path):
+    report = run_task([PY, None], tmp_path)
+    assert report.outcome == "harness_error"
+    assert report.task_exit_code is None
+    assert report.task_signal is None
+    assert report.error
+    assert "could not launch unshare" in report.error
+    assert report.sandbox_removed is True
+    assert list(tmp_path.glob("run-*")) == []
+
+
+def test_cli_reports_a_none_command_element_as_a_harness_error(tmp_path, capsys):
+    # The command list is handed to main the way a caller of
+    # the library builds it, because shell arguments cannot
+    # carry a None element through a process boundary.
+    from mayfly.cli import main as cli_main
+
+    code = cli_main(["run", "--root", str(tmp_path), "--", PY, None])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 125
+    assert payload["outcome"] == "harness_error"
+    assert payload["task_exit_code"] is None
+    assert payload["task_signal"] is None
+
+
+@requires_sandbox
+def test_the_init_leaves_provenance_beside_an_assembled_root(tmp_path):
+    # Drive the real assemble_root inside a real namespace with
+    # no runner involved, so no runner write can account for
+    # the provenance. The residue a killed prepare leaves is
+    # whatever this assembly created, and it must carry the
+    # provenance the sweep trusts or no sweep will collect it.
+    sandbox = tmp_path / "run-seam00000001"
+    rootfs = sandbox / "rootfs"
+    driver = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('mayfly_init', sys.argv[2])\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "mod.assemble_root(sys.argv[1])\n"
+    )
+    result = subprocess.run(
+        [
+            shutil.which("unshare"),
+            "--user",
+            "--map-root-user",
+            "--mount",
+            "--pid",
+            "--uts",
+            "--ipc",
+            "--fork",
+            PY,
+            "-c",
+            driver,
+            str(rootfs),
+            str(ROOT / "mayfly" / "_init.py"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    provenance = sandbox / ".mayfly-provenance"
+    assert provenance.is_file()
+    assert provenance.read_text(encoding="utf-8").strip() == "seam00000001"
+    assert (rootfs / "usr").is_dir()
+
+
+@requires_sandbox
+def test_a_run_killed_inside_prepare_leaves_nothing_unsweepable(tmp_path):
+    import signal as signal_module
+
+    root = tmp_path / "root"
+    root.mkdir()
+    marker = "prepare-window-" + str(os.getpid())
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT)
+    for _trial in range(8):
+        proc = subprocess.Popen(
+            [
+                PY,
+                "-m",
+                "mayfly",
+                "run",
+                "--root",
+                str(root),
+                "--",
+                PY,
+                "-c",
+                "import time; time.sleep(30)  # " + marker,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=ROOT,
+            env=env,
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            under_way = any(
+                (candidate / "rootfs" / "usr").exists()
+                for candidate in root.glob("run-*")
+            )
+            if under_way:
+                break
+            time.sleep(0.002)
+        if proc.poll() is None:
+            proc.send_signal(signal_module.SIGKILL)
+        proc.wait(timeout=30)
+
+    def quiet():
+        if _host_pids_with_marker(marker):
+            return False
+        for leftover in root.glob("run-*"):
+            if namespace_module._pids_referencing(str(leftover)):
+                return False
+        return True
+
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if quiet():
+            time.sleep(0.5)
+            if quiet():
+                break
+    else:
+        raise AssertionError("the killed runs never went quiet")
+
+    leftovers = sorted(root.glob("run-*"))
+    for leftover in leftovers:
+        run_id = leftover.name[len("run-"):]
+        provenance = leftover / ".mayfly-provenance"
+        assert provenance.is_file(), leftover
+        assert provenance.read_text(encoding="utf-8").strip() == run_id
+        _age_directory(leftover)
+    for clean_marker in root.glob(".mayfly-clean-*"):
+        _age_directory(clean_marker)
+    for _attempt in range(3):
+        if not list(root.glob("run-*")) and not list(root.glob(".mayfly-clean-*")):
+            break
+        report = run_task([PY, "-c", "pass"], root)
+        assert report.outcome == "task"
     assert list(root.glob("run-*")) == []
     assert list(root.glob(".mayfly-clean-*")) == []
