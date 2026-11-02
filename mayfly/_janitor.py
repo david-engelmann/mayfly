@@ -54,20 +54,36 @@ def _read_token():
 def _marker_carries_token(marker, token):
     """Whether the marker carries exactly this run's token.
 
-    The read is bounded by a limit derived from the token
-    length, and a marker that runs past the limit is not the
-    clean marker whatever its first bytes say. Bytes that are
-    not valid text decode to replacement characters and fail
-    the comparison. A planted marker that is oversized or
-    undecodable therefore reads as a marker without the token,
-    and the sandbox is removed.
+    The marker is opened only where the marker path is a
+    regular file, so a pipe or any other planted object at the
+    path reads as a marker without the token instead of
+    blocking the janitor inside its open while the sandbox
+    stands. The check follows a symlink to the file it names,
+    and a symlink is read through and never removed. The read
+    itself cannot block and is bounded by a limit derived from
+    the token length, and a marker that runs past the limit is
+    not the clean marker whatever its first bytes say. Bytes
+    that are not valid text decode to replacement characters
+    and fail the comparison. A planted marker that is oversized
+    or undecodable therefore reads as a marker without the
+    token, and the sandbox is removed.
     """
     limit = len(token.encode("utf-8")) + 64
     try:
-        with open(marker, "rb") as handle:
-            raw = handle.read(limit + 1)
+        if not os.path.isfile(marker):
+            return False
     except OSError:
         return False
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        raw = os.read(fd, limit + 1)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
     if len(raw) > limit:
         return False
     return raw.decode("utf-8", errors="replace").strip() == token

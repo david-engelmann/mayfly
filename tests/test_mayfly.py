@@ -1004,6 +1004,140 @@ def test_the_sweep_leaves_a_directory_whose_provenance_names_another_run(tmp_pat
     assert list(root.glob("run-*")) == [foreign]
 
 
+@requires_sandbox
+def test_a_provenance_with_bytes_that_are_not_text_leaves_the_directory_standing(
+    tmp_path,
+):
+    root = tmp_path / "root"
+    planted = root / "run-cccc00000003"
+    planted.mkdir(parents=True)
+    (planted / ".mayfly-provenance").write_bytes(b"\xff\xfe\x00binary")
+    _age_directory(planted)
+    report = run_task([PY, "-c", "pass"], root)
+    assert report.outcome == "task"
+    assert (planted / ".mayfly-provenance").read_bytes() == b"\xff\xfe\x00binary"
+    assert list(root.glob("run-*")) == [planted]
+
+
+def _run_task_on_a_thread(root, command):
+    outcome = {}
+
+    def drive():
+        try:
+            outcome["report"] = run_task(command, root)
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=drive, daemon=True)
+    thread.start()
+    return thread, outcome
+
+
+@requires_sandbox
+def test_a_fifo_at_the_provenance_path_neither_hangs_nor_breaks_the_run(tmp_path):
+    root = tmp_path / "root"
+    planted = root / "run-dddd00000004"
+    planted.mkdir(parents=True)
+    os.mkfifo(planted / ".mayfly-provenance")
+    _age_directory(planted)
+    thread, outcome = _run_task_on_a_thread(root, [PY, "-c", "pass"])
+    thread.join(timeout=60)
+    assert not thread.is_alive(), "the triggered run hung on the planted pipe"
+    assert "error" not in outcome
+    assert outcome["report"].outcome == "task"
+    assert planted.exists()
+    assert list(root.glob("run-*")) == [planted]
+
+
+@requires_sandbox
+def test_a_fifo_at_the_marker_path_does_not_keep_the_sandbox(tmp_path):
+    import signal as signal_module
+    import uuid
+
+    marker = "mayfly-death-" + uuid.uuid4().hex
+    proc = _start_cli_with_sleeping_task(tmp_path, marker)
+    sandboxes = list(tmp_path.glob("run-*"))
+    assert len(sandboxes) == 1
+    run_id = sandboxes[0].name[len("run-"):]
+    os.mkfifo(tmp_path / (".mayfly-clean-" + run_id))
+    proc.send_signal(signal_module.SIGKILL)
+    proc.wait(timeout=30)
+    assert _wait_until(lambda: not _host_pids_with_marker(marker), 30)
+    assert _wait_until(lambda: list(tmp_path.glob("run-*")) == [], 30)
+    assert list(tmp_path.glob(".mayfly-clean-*")) == []
+
+
+@requires_sandbox
+def test_a_fifo_at_the_marker_path_does_not_block_a_clean_run(tmp_path):
+    root = tmp_path / "root"
+    thread, outcome = _run_task_on_a_thread(
+        root, [PY, "-c", "import time; time.sleep(4)"]
+    )
+    assert _wait_until(lambda: len(list(root.glob("run-*"))) == 1, 15)
+    sandbox = next(root.glob("run-*"))
+    run_id = sandbox.name[len("run-"):]
+    os.mkfifo(root / (".mayfly-clean-" + run_id))
+    thread.join(timeout=60)
+    assert not thread.is_alive(), "the clean run blocked on the planted pipe"
+    assert "error" not in outcome
+    report = outcome["report"]
+    assert report.outcome == "task"
+    assert report.sandbox_removed is True
+    assert list(root.iterdir()) == []
+
+
+def test_the_janitor_reads_a_fifo_marker_as_no_token(tmp_path):
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    (sandbox / "leftover.txt").write_text("left behind", encoding="utf-8")
+    marker = tmp_path / "clean-marker"
+    os.mkfifo(marker)
+    assert _drive_janitor(sandbox, marker, "ab" * 16) == 0
+    assert not sandbox.exists()
+
+
+def test_the_janitor_removes_a_sandbox_that_is_already_gone_as_a_noop(tmp_path):
+    sandbox = tmp_path / "sandbox-that-is-not-there"
+    marker = tmp_path / "clean-marker-that-is-not-there"
+    assert _drive_janitor(sandbox, marker, "ab" * 16) == 0
+    assert not sandbox.exists()
+
+
+def test_the_sweep_reads_a_table_it_cannot_read_at_all_as_unknown(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "root"
+    planted = root / "run-eeee00000005"
+    planted.mkdir(parents=True)
+    (planted / ".mayfly-provenance").write_text("eeee00000005\n", encoding="utf-8")
+    _age_directory(planted)
+    sleeper = subprocess.Popen(
+        [PY, "-c", "import time; time.sleep(60)", str(planted)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait_until(
+            lambda: sleeper.pid in (namespace_module._pids_referencing(str(planted)) or []),
+            15,
+        )
+        real_open = open
+
+        def refusing_open(path, *args, **kwargs):
+            text = os.fspath(path) if isinstance(path, (str, os.PathLike)) else ""
+            if text.startswith("/proc") and text.endswith("cmdline"):
+                raise OSError("the command line cannot be read")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(namespace_module, "open", refusing_open, raising=False)
+        assert namespace_module._pids_referencing(str(planted)) is None
+        namespace_module._sweep_orphans(root)
+        assert planted.exists()
+    finally:
+        sleeper.terminate()
+        sleeper.wait(timeout=15)
+
+
 FAKE_UNSHARE = """#!/usr/bin/env python3
 import json
 import os

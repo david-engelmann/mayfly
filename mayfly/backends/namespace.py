@@ -31,6 +31,7 @@ import os
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -118,9 +119,11 @@ def _pids_referencing(path_text):
     directory, the janitor through its sandbox argument and the
     init through its rootfs argument, so a sandbox directory no
     live process names belongs to a run that is over. Returns
-    None when the process table cannot be listed at all, because
-    an unlistable table says nothing about which runs are live
-    and must never read as an empty one.
+    None when the process table cannot be listed at all, and
+    also when it lists but not one command line in it can be
+    read, because a table that cannot be read in substance says
+    nothing about which runs are live and must never read as an
+    empty one.
     """
     needle = os.fsencode(path_text)
     found = []
@@ -128,6 +131,7 @@ def _pids_referencing(path_text):
         entries = os.listdir("/proc")
     except OSError:
         return None
+    reads = 0
     for entry in entries:
         if not entry.isdigit():
             continue
@@ -139,9 +143,62 @@ def _pids_referencing(path_text):
                 cmdline = handle.read()
         except OSError:
             continue
+        reads += 1
         if needle in cmdline:
             found.append(pid)
+    if reads == 0:
+        return None
     return found
+
+
+PROVENANCE_READ_LIMIT = 4096
+
+
+def _read_provenance(entry):
+    """The run id a directory's provenance file records, or None.
+
+    Every failure shape reads as no provenance at all, because
+    each one means the directory carries nothing the sweep may
+    trust. A path that is not a regular file names nothing, and
+    neither do bytes that are not text and a read that fails.
+    The check follows a symlink to the file it names, so a
+    provenance that is a symlink to a regular file reads
+    through to that file and the file itself is never touched.
+    The open cannot block and the read is bounded, so a pipe
+    planted at the provenance path or a file without end can
+    neither hang the sweep nor fill its memory, and the strict
+    decode lives inside the guard, so bytes that are not text
+    raise nothing out of the sweep or the run behind it.
+    """
+    path = entry / PROVENANCE_NAME
+    try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            return None
+    except OSError:
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        chunks = []
+        total = 0
+        while total <= PROVENANCE_READ_LIMIT:
+            chunk = os.read(fd, PROVENANCE_READ_LIMIT)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > PROVENANCE_READ_LIMIT:
+            return None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        return b"".join(chunks).decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
 
 
 def _sweep_orphans(root):
@@ -170,13 +227,7 @@ def _sweep_orphans(root):
                 if now - entry.stat().st_mtime < ORPHAN_GRACE_SECONDS:
                     continue
                 run_id = entry.name[len("run-"):]
-                try:
-                    recorded = (entry / PROVENANCE_NAME).read_text(
-                        encoding="utf-8"
-                    ).strip()
-                except OSError:
-                    continue
-                if recorded != run_id:
+                if _read_provenance(entry) != run_id:
                     continue
                 referencing = _pids_referencing(str(entry))
                 if referencing is None or referencing:
@@ -237,6 +288,45 @@ def _signal_guard(interrupted, interrupt_times=None):
                 signal.signal(name, previous)
             except (ValueError, OSError):
                 pass
+
+
+def _write_clean_marker(marker, token):
+    """Leave the clean marker carrying this run's token.
+
+    A non regular object planted at the marker path is
+    unlinked first, because opening a planted pipe for writing
+    would block the finish past the end of the task. The
+    planted object itself is all the unlink ever touches, the
+    file a planted symlink names is never opened or removed.
+    Where the planted object cannot be removed, the write is
+    skipped and the run still finishes cleanly, and the janitor
+    completes the cleanup in the runner's place when it sees
+    its supervisor gone with no valid marker, removing a
+    sandbox that is already gone as a no-op. The write itself
+    cannot block either, so a pipe swapped into the path after
+    the check fails the open instead of hanging on it.
+    """
+    try:
+        mode = marker.lstat().st_mode
+    except OSError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        try:
+            marker.unlink()
+        except OSError:
+            return
+    try:
+        fd = os.open(
+            marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NONBLOCK, 0o644
+        )
+    except OSError:
+        return
+    try:
+        os.write(fd, (token + "\n").encode("utf-8"))
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 class NamespaceBackend:
@@ -401,10 +491,7 @@ class NamespaceBackend:
                 janitor_proc, janitor_fd = janitor
                 clean = bool(report.sandbox_removed)
                 if clean:
-                    try:
-                        marker.write_text(token + "\n", encoding="utf-8")
-                    except OSError:
-                        pass
+                    _write_clean_marker(marker, token)
                 try:
                     os.close(janitor_fd)
                 except OSError:
