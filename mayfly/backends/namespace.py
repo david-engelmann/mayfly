@@ -530,10 +530,13 @@ class NamespaceBackend:
         # unchanged, and the cleanup in the finally below now
         # also stands the janitor down on the prepare failure
         # and the missing unshare paths, where no janitor
-        # existed before. The one segment no cleanup layer
-        # covers is the segment between the directory's
-        # creation above and this spawn, and MF-12 names what
-        # a death inside it can leave standing.
+        # existed before. What no cleanup layer covers is a
+        # death before the born provenance write below lands,
+        # whether it falls in the segment between the
+        # directory's creation above and this spawn or takes
+        # the janitor with the supervisor in a double kill
+        # after it, and MF-12 names what such a death can
+        # leave standing.
         token = secrets.token_hex(16)
         janitor = self._start_janitor(sandbox_dir, marker, token)
         try:
