@@ -22,7 +22,7 @@ The remote seed was verified on 2026-11-02 against the staged seed and its commi
 
 The contract lives in CONTRACT.md, where the setup obligations S1 to S5 stand beside the full contract that landed with slice 1, obligations MF-1 to MF-12, each stated so it can fail.
 
-Closed perfection rounds are 0 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
+Closed perfection rounds are 1 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
 
 The local gate is python -m pytest -q plus python scripts/codepoint_scan.py, run on the exact final head before any push, with the continuous integration workflow running the same commands as a backstop.
 
