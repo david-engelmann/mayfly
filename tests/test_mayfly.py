@@ -974,6 +974,7 @@ def test_the_contract_promises_no_more_than_the_provenance_check_holds():
     assert "never swept however it is named" not in mf12
     assert "it is not authentication" in mf12
     assert "written again by the init" in mf12
+    assert "when its assembly of the prepared root begins" in mf12
     assert "lands whole or not at all" in mf12
 
 
@@ -1019,6 +1020,41 @@ def _drive_janitor(sandbox, marker, token):
     os.close(write_fd)
     proc.wait(timeout=40)
     return proc.returncode
+
+
+def _spawn_janitor(sandbox, marker, token):
+    """Start one janitor and hand it a dead supervisor, then return it.
+
+    The token arrives over standard input and the watch pipe
+    is closed at once, which is the supervisor dying without
+    a word. Unlike _drive_janitor the caller keeps the
+    process, so a pin can act on the run root while the
+    janitor is still at work.
+    """
+    read_fd, write_fd = os.pipe()
+    janitor_path = ROOT / "mayfly" / "_janitor.py"
+    proc = subprocess.Popen(
+        [
+            PY,
+            str(janitor_path),
+            "--sandbox",
+            str(sandbox),
+            "--marker",
+            str(marker),
+            "--fd",
+            str(read_fd),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        pass_fds=(read_fd,),
+        start_new_session=True,
+    )
+    os.close(read_fd)
+    proc.stdin.write(token.encode("utf-8") + b"\n")
+    proc.stdin.close()
+    os.close(write_fd)
+    return proc
 
 
 def test_the_janitor_marker_read_is_bounded_and_bad_bytes_read_as_no_token(tmp_path):
@@ -1230,6 +1266,37 @@ def test_the_janitor_removes_a_sandbox_that_is_already_gone_as_a_noop(tmp_path):
     marker = tmp_path / "clean-marker-that-is-not-there"
     assert _drive_janitor(sandbox, marker, "ab" * 16) == 0
     assert not sandbox.exists()
+
+
+def test_the_janitor_removes_a_sandbox_recreated_behind_its_removal(tmp_path):
+    # A supervisor killed while its init is still assembling
+    # leaves the init dying behind the janitor. The janitor
+    # removes the sandbox, and the dying init recreates the
+    # sandbox shape on the same path behind the removal,
+    # carrying nothing the sweep can trust. The janitor
+    # watches the path it removed and removes the recreation
+    # too, and a run id is never reused, so a reappearance
+    # inside the watch window can only be that recreation and
+    # never a directory a later live run created.
+    sandbox = tmp_path / "run-watch00000001"
+    (sandbox / "rootfs" / "usr").mkdir(parents=True)
+    marker = tmp_path / ".mayfly-clean-watch00000001"
+    proc = _spawn_janitor(sandbox, marker, "cd" * 16)
+    try:
+        deadline = time.monotonic() + 20
+        while sandbox.exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert not sandbox.exists()
+        (sandbox / "rootfs" / "usr").mkdir(parents=True)
+        deadline = time.monotonic() + 20
+        while sandbox.exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert not sandbox.exists()
+        assert proc.wait(timeout=30) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
 
 
 def test_the_sweep_reads_a_table_it_cannot_read_at_all_as_unknown(
@@ -1601,6 +1668,41 @@ def test_the_init_provenance_write_leaves_the_born_copy_standing(tmp_path, monke
         ".mayfly-provenance",
         "rootfs",
     ]
+
+
+def test_the_init_writes_provenance_before_the_first_assembly_step(
+    tmp_path, monkeypatch
+):
+    # The provenance write is the first step of the assembly,
+    # so a removal that lands before the assembly starts meets
+    # the write rather than only the end of assembly one. This
+    # drives the real assemble_root with its mount layer made
+    # to die at the first mount call, the step the write now
+    # precedes, and checks the provenance already stands while
+    # no rootfs directory has been created. The seam is the
+    # ordering inside assemble_root itself, proven by the
+    # state the dying assembly leaves behind.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "mayfly_init_order", ROOT / "mayfly" / "_init.py"
+    )
+    init_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(init_module)
+    sandbox = tmp_path / "run-order0000001"
+    rootfs = sandbox / "rootfs"
+    rootfs.mkdir(parents=True)
+
+    def dying_mount(*args, **kwargs):
+        raise OSError("the mount layer dies at its first call")
+
+    monkeypatch.setattr(init_module, "_mount", dying_mount)
+    with pytest.raises(OSError):
+        init_module.assemble_root(str(rootfs))
+    provenance = sandbox / ".mayfly-provenance"
+    assert provenance.is_file()
+    assert provenance.read_text(encoding="utf-8").strip() == "order0000001"
+    assert not (rootfs / "usr").exists()
 
 
 def test_the_runner_provenance_write_leaves_no_partial_file_behind(

@@ -110,6 +110,7 @@ def _remount_read_only_tree(target):
 
 def assemble_root(rootfs):
     """Build the prepared root and return whether proc was mounted."""
+    _write_provenance(rootfs)
     _mount(None, "/", None, MS_REC | MS_PRIVATE)
     for name in ROOT_DIRS:
         os.makedirs(os.path.join(rootfs, name), exist_ok=True)
@@ -155,10 +156,13 @@ def _write_provenance(rootfs):
     way, and the assembly then recreates the rootfs shape on
     the same path, so a skeleton left that way carried no
     provenance and no sweep would ever collect it. The init
-    therefore writes the provenance again when its creation
-    work is done, naming the run the directory name already
-    carries, so any residue this assembly leaves stands under
-    the provenance it was born with. The write lands through
+    therefore writes the provenance when its creation work
+    begins and again when that work is done, naming the run
+    the directory name already carries, so any residue this
+    assembly leaves stands under the provenance it was born
+    with, and a removal that lands before the assembly starts
+    meets the write at the assembly's first step rather than
+    only at its last. The write lands through
     a temporary file in the same directory that is renamed
     over the provenance path, so a death inside the write
     leaves the runner copy standing whole and never a

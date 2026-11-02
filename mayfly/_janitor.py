@@ -14,7 +14,11 @@ without the token was planted by someone else and stands nothing
 down. When the runner dies without removing the sandbox, the pipe
 closes with no genuine marker left, and the janitor removes the
 sandbox directory itself, so a killed supervisor leaves no sandbox
-directory behind.
+directory behind. The removal can land while the run's init is
+still dying, and the init then recreates the sandbox shape behind
+the removal, so the janitor watches the removed path for a few
+seconds afterwards and removes the directory again if it
+reappears.
 
 This file imports nothing from the mayfly package, because it runs
 by path beside the runner and must stay usable even when the runner
@@ -27,6 +31,7 @@ import sys
 import time
 
 RETRY_SECONDS = 30.0
+WATCH_SECONDS = 5.0
 
 
 def _read_token():
@@ -89,6 +94,29 @@ def _marker_carries_token(marker, token):
     return raw.decode("utf-8", errors="replace").strip() == token
 
 
+def _watch_for_recreation(sandbox):
+    """Remove the sandbox again if a dying init recreates it.
+
+    The removal in main can land while the run's init is still
+    dying, and the init then recreates the sandbox shape on the
+    same path behind the removal, carrying no provenance the
+    orphan sweep could trust. A run id is never reused, so a
+    directory that reappears at this path inside the watch
+    window can only be that dying init recreating its own
+    tree, and never a directory a later live run created at a
+    reused path. The watch is bounded, and the janitor leaves
+    when the window ends whether or not the path stands clear
+    at that moment.
+    """
+    deadline = time.monotonic() + WATCH_SECONDS
+    while time.monotonic() < deadline:
+        if os.path.exists(sandbox):
+            shutil.rmtree(sandbox, ignore_errors=True)
+        time.sleep(0.1)
+    if os.path.exists(sandbox):
+        shutil.rmtree(sandbox, ignore_errors=True)
+
+
 def main(argv):
     opts = {}
     index = 0
@@ -128,6 +156,8 @@ def main(argv):
         os.unlink(marker)
     except OSError:
         pass
+    if not os.path.exists(sandbox):
+        _watch_for_recreation(sandbox)
     return 0
 
 
