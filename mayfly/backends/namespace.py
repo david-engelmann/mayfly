@@ -207,6 +207,32 @@ def _read_provenance(entry):
         return None
 
 
+def _write_provenance(sandbox_dir, run_id):
+    """Write the run provenance inside a fresh sandbox directory.
+
+    The write lands through a temporary file in the same
+    directory that is renamed over the provenance path, so a
+    reader sees either no provenance at all or the complete
+    file, and a death inside the write leaves no truncated
+    file behind that names nothing and no sweep would ever
+    collect. A failure raises OSError, which the caller
+    reports as a prepare failure, and the temporary file is
+    removed on the way out.
+    """
+    target = sandbox_dir / PROVENANCE_NAME
+    tmp = sandbox_dir / (PROVENANCE_NAME + ".tmp-" + str(os.getpid()))
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(run_id + "\n")
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _sweep_orphans(root):
     """Remove sandbox directories under root whose runs are dead.
 
@@ -474,9 +500,7 @@ class NamespaceBackend:
         phase = time.perf_counter()
         try:
             (sandbox_dir / "rootfs").mkdir(parents=True)
-            (sandbox_dir / PROVENANCE_NAME).write_text(
-                run_id + "\n", encoding="utf-8"
-            )
+            _write_provenance(sandbox_dir, run_id)
         except OSError as exc:
             report.error = "prepare failed, " + str(exc)
             timings["prepare"] = _ms(phase)

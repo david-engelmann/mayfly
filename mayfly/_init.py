@@ -158,20 +158,32 @@ def _write_provenance(rootfs):
     therefore writes the provenance again when its creation
     work is done, naming the run the directory name already
     carries, so any residue this assembly leaves stands under
-    the provenance it was born with. A failure to write it is
-    swallowed, because the runner copy may still stand and a
-    missing provenance must never fail a run whose sandbox is
-    otherwise sound.
+    the provenance it was born with. The write lands through
+    a temporary file in the same directory that is renamed
+    over the provenance path, so a death inside the write
+    leaves the runner copy standing whole and never a
+    truncated file that names nothing. A failure to write it
+    is swallowed, because the runner copy may still stand and
+    a missing provenance must never fail a run whose sandbox
+    is otherwise sound.
     """
     sandbox = os.path.dirname(os.path.abspath(rootfs))
     name = os.path.basename(sandbox)
     if not name.startswith("run-"):
         return
+    target = os.path.join(sandbox, ".mayfly-provenance")
+    tmp = target + ".tmp-" + str(os.getpid())
     try:
-        with open(
-            os.path.join(sandbox, ".mayfly-provenance"), "w", encoding="utf-8"
-        ) as handle:
-            handle.write(name[len("run-"):] + "\n")
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(name[len("run-"):] + "\n")
+            os.replace(tmp, target)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     except OSError:
         pass
 

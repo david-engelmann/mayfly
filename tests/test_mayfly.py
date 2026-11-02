@@ -974,6 +974,17 @@ def test_the_contract_promises_no_more_than_the_provenance_check_holds():
     assert "never swept however it is named" not in mf12
     assert "it is not authentication" in mf12
     assert "written again by the init" in mf12
+    assert "lands whole or not at all" in mf12
+
+
+def test_the_readme_cleanup_claim_carries_the_sweep_fallback():
+    # The layered cleanup is the truth the contract states,
+    # so the README sentence about a killed command must
+    # carry the sweep fallback rather than promise the
+    # directory is always already gone.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "leaves no task running and no sandbox directory behind" not in readme
+    assert "the next run under the same root sweeps the directory away" in readme
 
 
 def _drive_janitor(sandbox, marker, token):
@@ -1532,6 +1543,94 @@ def test_the_init_leaves_provenance_beside_an_assembled_root(tmp_path):
     assert provenance.is_file()
     assert provenance.read_text(encoding="utf-8").strip() == "seam00000001"
     assert (rootfs / "usr").is_dir()
+
+
+class _DyingWriteHandle:
+    """A file handle whose write dies, as a death lands mid write.
+
+    The real handle underneath was opened the way the code
+    under test opened it, so any truncate on open has already
+    happened by the time the write raises, which is exactly
+    the window the atomic provenance write exists to close.
+    """
+
+    def __init__(self, handle):
+        self._handle = handle
+
+    def write(self, data):
+        raise OSError("a death inside the write")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._handle.close()
+        return False
+
+
+def _open_with_dying_write(path, mode="r", *args, **kwargs):
+    handle = open(path, mode, *args, **kwargs)
+    if "w" in mode:
+        return _DyingWriteHandle(handle)
+    return handle
+
+
+def test_the_init_provenance_write_leaves_the_born_copy_standing(tmp_path, monkeypatch):
+    # The init rewrites the provenance the runner wrote at
+    # creation. A death inside that write must leave the born
+    # copy standing whole, because a truncated provenance
+    # names nothing and no sweep would ever collect the
+    # directory it stands in.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "mayfly_init_atomic", ROOT / "mayfly" / "_init.py"
+    )
+    init_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(init_module)
+    sandbox = tmp_path / "run-born00000001"
+    (sandbox / "rootfs").mkdir(parents=True)
+    provenance = sandbox / ".mayfly-provenance"
+    provenance.write_text("born00000001\n", encoding="utf-8")
+    monkeypatch.setattr(
+        init_module, "open", _open_with_dying_write, raising=False
+    )
+    init_module._write_provenance(str(sandbox / "rootfs"))
+    assert provenance.read_text(encoding="utf-8") == "born00000001\n"
+    assert sorted(p.name for p in sandbox.iterdir()) == [
+        ".mayfly-provenance",
+        "rootfs",
+    ]
+
+
+def test_the_runner_provenance_write_leaves_no_partial_file_behind(
+    tmp_path, monkeypatch
+):
+    # The runner writes the provenance when it creates the
+    # sandbox directory. A death inside that write must leave
+    # the provenance path absent at creation, and a death
+    # inside a rewrite must leave the complete file standing,
+    # never a truncated one.
+    sandbox = tmp_path / "run-born00000002"
+    sandbox.mkdir()
+    provenance = sandbox / ".mayfly-provenance"
+    monkeypatch.setattr(
+        namespace_module, "open", _open_with_dying_write, raising=False
+    )
+    with pytest.raises(OSError):
+        namespace_module._write_provenance(sandbox, "born00000002")
+    assert not provenance.exists()
+    assert list(sandbox.iterdir()) == []
+    monkeypatch.setattr(namespace_module, "open", open, raising=False)
+    namespace_module._write_provenance(sandbox, "born00000002")
+    assert provenance.read_text(encoding="utf-8") == "born00000002\n"
+    monkeypatch.setattr(
+        namespace_module, "open", _open_with_dying_write, raising=False
+    )
+    with pytest.raises(OSError):
+        namespace_module._write_provenance(sandbox, "born00000003")
+    assert provenance.read_text(encoding="utf-8") == "born00000002\n"
+    assert sorted(p.name for p in sandbox.iterdir()) == [".mayfly-provenance"]
 
 
 @requires_sandbox
