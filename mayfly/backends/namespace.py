@@ -499,7 +499,22 @@ class NamespaceBackend:
     ):
         phase = time.perf_counter()
         try:
-            (sandbox_dir / "rootfs").mkdir(parents=True)
+            sandbox_dir.mkdir(parents=True)
+        except OSError as exc:
+            # The run directory is created as its own first
+            # step, apart from everything prepared inside it,
+            # so a failure here ends the run before it owns
+            # anything. Where the directory already stands,
+            # planted in the run root or met by the rare
+            # collision on a run id, it is not this run's to
+            # remove, and no teardown runs against it. The run
+            # reports the failure and leaves the standing tree
+            # exactly as it found it.
+            report.error = "prepare failed, " + str(exc)
+            timings["prepare"] = _ms(phase)
+            return report
+        try:
+            (sandbox_dir / "rootfs").mkdir()
         except OSError as exc:
             report.error = "prepare failed, " + str(exc)
             timings["prepare"] = _ms(phase)

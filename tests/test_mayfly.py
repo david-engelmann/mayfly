@@ -988,6 +988,86 @@ def test_the_readme_cleanup_claim_carries_the_sweep_fallback():
     assert "the next run under the same root sweeps the directory away" in readme
 
 
+def test_the_contract_cleanup_claim_carries_the_layered_cleanup():
+    # The contract sentence is held to the same form as the
+    # README sentence the sixth repair qualified, so MF-12
+    # must not promise the directory is already gone where
+    # only the layered cleanup as a whole makes it so.
+    contract = (ROOT / "CONTRACT.md").read_text(encoding="utf-8")
+    mf12 = contract[contract.index("Obligation MF-12 covers"):]
+    assert "leaves no task running and no sandbox directory behind" not in mf12
+    assert "once the layered cleanup this paragraph describes has run" in mf12
+
+
+def _snapshot_tree(base):
+    return {
+        str(path.relative_to(base)): path.read_bytes()
+        for path in sorted(base.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _run_with_a_fixed_run_id(monkeypatch, run_id, root):
+    # The suite controls the run id by fixing the uuid the
+    # backend draws it from, so the run can be aimed at a
+    # directory planted at the path that id names.
+    import uuid
+
+    fixed = uuid.UUID(run_id + "0" * (32 - len(run_id)))
+    monkeypatch.setattr(uuid, "uuid4", lambda: fixed)
+    return NamespaceBackend().run(
+        RunSpec(command=[PY, "-c", "pass"], root=root)
+    )
+
+
+def test_a_run_refuses_a_standing_run_directory_and_leaves_it_standing(
+    tmp_path, monkeypatch
+):
+    # The run directory is created as a distinct first step,
+    # so a directory already standing at the run's own path,
+    # planted there or met by a collision on the run id,
+    # ends the run as a harness error and is left exactly as
+    # it stood. Before this repair the runner adopted the
+    # directory as its own, prepared inside it, and tore it
+    # down with the run.
+    run_id = "deadbeef0001"
+    sandbox = tmp_path / ("run-" + run_id)
+    sandbox.mkdir()
+    sentinel = sandbox / "sentinel.txt"
+    sentinel.write_text("planted before the run\n", encoding="utf-8")
+    before = _snapshot_tree(sandbox)
+    report = _run_with_a_fixed_run_id(monkeypatch, run_id, tmp_path)
+    assert report.run_id == run_id
+    assert report.outcome == "harness_error"
+    assert report.error and "prepare failed" in report.error
+    assert report.sandbox_removed is False
+    assert _snapshot_tree(sandbox) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == [sandbox.name]
+
+
+def test_a_run_refuses_a_standing_rootfs_and_leaves_it_standing(
+    tmp_path, monkeypatch
+):
+    # The second planted shape is the rootfs alone standing
+    # inside the run directory. Before this repair the rootfs
+    # creation failed on it and the failure handler tore the
+    # whole standing tree down, a tree the run never created.
+    run_id = "deadbeef0002"
+    sandbox = tmp_path / ("run-" + run_id)
+    rootfs = sandbox / "rootfs"
+    rootfs.mkdir(parents=True)
+    sentinel = rootfs / "sentinel.txt"
+    sentinel.write_text("planted before the run\n", encoding="utf-8")
+    before = _snapshot_tree(sandbox)
+    report = _run_with_a_fixed_run_id(monkeypatch, run_id, tmp_path)
+    assert report.run_id == run_id
+    assert report.outcome == "harness_error"
+    assert report.error and "prepare failed" in report.error
+    assert report.sandbox_removed is False
+    assert _snapshot_tree(sandbox) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == [sandbox.name]
+
+
 def _drive_janitor(sandbox, marker, token):
     """Run one janitor the way the runner runs it, with a dead supervisor.
 
