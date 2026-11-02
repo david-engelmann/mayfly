@@ -43,10 +43,10 @@ def test_contract_names_five_setup_obligations():
     assert "Obligation S6" not in text
 
 
-def test_readme_status_reports_zero_closed_rounds():
+def test_readme_status_reports_one_closed_round():
     text = read("README.md")
     assert "## Status" in text
-    assert "0 of 100" in text
+    assert "1 of 100" in text
     assert "ca5df488b41c75114a08b752aaa0ed2eae255c92" in text
 
 
