@@ -1,14 +1,5 @@
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "mayfly"
-version = "0.0.0"
-description = "A disposable micro-VM sandbox for agent tasks"
-readme = "README.md"
-requires-python = ">=3.11"
-license = { text = "MIT" }
+# Packaging metadata arrives with the first package in this repo.
+# Until then this file carries the pytest configuration only.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

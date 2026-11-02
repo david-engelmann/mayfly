@@ -4,7 +4,7 @@ Mayfly asks whether an agent task can run inside a disposable micro-VM that spin
 
 Obligation S1 covers seed integrity. The seed files README.md and LICENSE and .gitignore are present from the first commit, and every later change lands through a pull request rather than a direct push to main. This is covered by inspection of the repository history and by the status section of the README.
 
-Obligation S2 covers the local gate. The test suite runs with python and pytest alone and it needs no network access and no paid service, and the continuous integration workflow runs the same commands as the local gate. This is covered by the tests in the tests folder and by the workflow in the .github folder.
+Obligation S2 covers the local gate. The test suite runs with python and pytest alone and running it needs no network access and no paid service, and the continuous integration workflow runs the same commands as the local gate. This is covered by the tests in the tests folder and by the workflow in the .github folder.
 
 Obligation S3 covers honest status. The README status section records the seed state and the contract state truthfully and it reports closed perfection rounds as 0 of 100 until a full cycle of work and audit and review and red team and approval has closed. This is covered by inspection of the README against this contract and against the repository history.
 
