@@ -1,0 +1,5 @@
+# Packaging metadata arrives with the first package in this repo.
+# Until then this file carries the pytest configuration only.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
