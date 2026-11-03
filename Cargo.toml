@@ -1,0 +1,24 @@
+[package]
+name = "mayfly"
+version = "0.1.0"
+edition = "2021"
+description = "A disposable sandbox harness for agent tasks, with a Linux namespace backend"
+license = "MIT"
+
+[lib]
+name = "mayfly"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mayfly"
+path = "src/bin/mayfly.rs"
+
+[[bin]]
+name = "codepoint_scan"
+path = "src/bin/codepoint_scan.rs"
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+getrandom = "0.3"
+libc = "0.2"
