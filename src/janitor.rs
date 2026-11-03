@@ -145,11 +145,17 @@ pub fn janitor_main(args: &[OsString]) -> i32 {
     let token = read_token();
     let mut buf = [0u8; 4096];
     loop {
+        // The buffer is owned here and sized to the read, and
+        // the descriptor is the watch pipe the runner handed
+        // this janitor, read until the runner closing it ends
+        // the wait.
         let rc = unsafe { libc::read(watch_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
         if rc <= 0 {
             break;
         }
     }
+    // The watch descriptor is closed exactly once, here, when
+    // the wait it served is over.
     unsafe {
         libc::close(watch_fd);
     }

@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::{dump_pretty, get_backend, JsonValue, RunSpec, HARNESS_EXIT_CODE};
+use crate::{dump_pretty, get_backend, JsonValue, Outcome, RunSpec, HARNESS_EXIT_CODE};
 
 const USAGE: &str =
     "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--net] -- COMMAND...";
@@ -31,6 +31,19 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
     let mut network = false;
     let mut command: Vec<OsString> = Vec::new();
     let mut index = 0;
+    // The value an option takes. A token that starts with a
+    // hyphen is an option shape, never a value, so an option
+    // followed by one is missing its value, the same refusal
+    // the argparse command line of Round 1 made.
+    let option_value = |rest: &[OsString], index: usize| -> Option<OsString> {
+        rest.get(index + 1).and_then(|value| {
+            if value.to_string_lossy().starts_with('-') {
+                None
+            } else {
+                Some(value.clone())
+            }
+        })
+    };
     while index < rest.len() {
         let arg = &rest[index];
         let text = arg.to_string_lossy().into_owned();
@@ -40,7 +53,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
         }
         match text.as_str() {
             "--root" => {
-                match rest.get(index + 1) {
+                match option_value(rest, index) {
                     Some(value) => root = Some(PathBuf::from(value)),
                     None => {
                         let _ = writeln!(err, "mayfly run needs a value after --root");
@@ -50,7 +63,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
                 index += 2;
             }
             "--backend" => {
-                match rest.get(index + 1) {
+                match option_value(rest, index) {
                     Some(value) => backend = value.to_string_lossy().into_owned(),
                     None => {
                         let _ = writeln!(err, "mayfly run needs a value after --backend");
@@ -60,8 +73,8 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
                 index += 2;
             }
             "--allow-env" => {
-                match rest.get(index + 1) {
-                    Some(value) => allow_env.push(value.clone()),
+                match option_value(rest, index) {
+                    Some(value) => allow_env.push(value),
                     None => {
                         let _ = writeln!(err, "mayfly run needs a value after --allow-env");
                         return 2;
@@ -130,7 +143,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
         }
     };
     let _ = writeln!(out, "{}", report.to_json());
-    if report.outcome == "harness_error" {
+    if report.outcome == Outcome::HarnessError {
         return HARNESS_EXIT_CODE;
     }
     if let Some(signal) = report.task_signal {

@@ -37,6 +37,8 @@ pub fn now() -> f64 {
         tv_sec: 0,
         tv_nsec: 0,
     };
+    // The destination is a fully initialised timespec owned by
+    // this call, and clock_gettime writes only through it.
     unsafe {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
     }
@@ -79,6 +81,9 @@ pub fn py_os_error_path(err: &io::Error, path: &Path) -> String {
 }
 
 pub fn strerror(errno: i32) -> String {
+    // strerror returns a pointer to a static string or null for
+    // an errno it does not know, and the CStr read copies the
+    // bytes out before anything can move them.
     unsafe {
         let ptr = libc::strerror(errno);
         if ptr.is_null() {
@@ -140,26 +145,77 @@ pub struct Timings {
     pub total: Option<f64>,
 }
 
+/// One lifecycle phase a run reports a timing for. The name is
+/// the key the report prints for the phase, and the phases are
+/// keyed by this type rather than by their name strings, so a
+/// mistyped phase is a compile error and never a missing key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Prepare,
+    Start,
+    Task,
+    Teardown,
+    Total,
+}
+
+impl Phase {
+    pub const ALL: [Phase; 5] = [
+        Phase::Prepare,
+        Phase::Start,
+        Phase::Task,
+        Phase::Teardown,
+        Phase::Total,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Phase::Prepare => "prepare",
+            Phase::Start => "start",
+            Phase::Task => "task",
+            Phase::Teardown => "teardown",
+            Phase::Total => "total",
+        }
+    }
+}
+
 impl Timings {
-    pub fn get(&self, phase: &str) -> Option<f64> {
+    pub fn get(&self, phase: Phase) -> Option<f64> {
         match phase {
-            "prepare" => self.prepare,
-            "start" => self.start,
-            "task" => self.task,
-            "teardown" => self.teardown,
-            "total" => self.total,
-            _ => None,
+            Phase::Prepare => self.prepare,
+            Phase::Start => self.start,
+            Phase::Task => self.task,
+            Phase::Teardown => self.teardown,
+            Phase::Total => self.total,
         }
     }
 
-    pub fn set(&mut self, phase: &str, value: Option<f64>) {
+    pub fn set(&mut self, phase: Phase, value: Option<f64>) {
         match phase {
-            "prepare" => self.prepare = value,
-            "start" => self.start = value,
-            "task" => self.task = value,
-            "teardown" => self.teardown = value,
-            "total" => self.total = value,
-            _ => {}
+            Phase::Prepare => self.prepare = value,
+            Phase::Start => self.start = value,
+            Phase::Task => self.task = value,
+            Phase::Teardown => self.teardown = value,
+            Phase::Total => self.total = value,
+        }
+    }
+}
+
+/// The outcome a run ends in, one of the two values the report
+/// prints for its outcome field. A report carries this type
+/// rather than the printed string, so an outcome the contract
+/// does not name cannot be built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Task,
+    HarnessError,
+}
+
+impl Outcome {
+    /// The text the report prints for this outcome.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Outcome::Task => "task",
+            Outcome::HarnessError => "harness_error",
         }
     }
 }
@@ -171,7 +227,7 @@ pub struct RunReport {
     pub run_id: String,
     pub sandbox_dir: String,
     pub command: Vec<OsString>,
-    pub outcome: String,
+    pub outcome: Outcome,
     pub task_exit_code: Option<i32>,
     pub task_signal: Option<i32>,
     pub error: Option<String>,
@@ -188,14 +244,14 @@ impl RunReport {
         run_id: &str,
         sandbox_dir: &str,
         command: Vec<OsString>,
-        outcome: &str,
+        outcome: Outcome,
     ) -> RunReport {
         RunReport {
             backend: backend.to_string(),
             run_id: run_id.to_string(),
             sandbox_dir: sandbox_dir.to_string(),
             command,
-            outcome: outcome.to_string(),
+            outcome,
             task_exit_code: None,
             task_signal: None,
             error: None,
@@ -209,8 +265,8 @@ impl RunReport {
 
     pub fn to_json(&self) -> String {
         let mut timings: Vec<(String, JsonValue)> = Vec::new();
-        for phase in ["prepare", "start", "task", "teardown", "total"] {
-            timings.push((phase.into(), opt_float(self.timings_ms.get(phase))));
+        for phase in Phase::ALL {
+            timings.push((phase.name().into(), opt_float(self.timings_ms.get(phase))));
         }
         let fields: Vec<(String, JsonValue)> = vec![
             ("backend".into(), JsonValue::Str(self.backend.clone())),
@@ -228,7 +284,10 @@ impl RunReport {
                         .collect(),
                 ),
             ),
-            ("outcome".into(), JsonValue::Str(self.outcome.clone())),
+            (
+                "outcome".into(),
+                JsonValue::Str(self.outcome.as_str().to_string()),
+            ),
             ("task_exit_code".into(), opt_int(self.task_exit_code)),
             ("task_signal".into(), opt_int(self.task_signal)),
             ("error".into(), opt_str(self.error.as_deref())),
@@ -438,6 +497,27 @@ pub fn set_helper_exe(path: &Path) {
 pub const PROVENANCE_NAME: &str = ".mayfly-provenance";
 pub const PROVENANCE_READ_LIMIT: usize = 4096;
 
+/// The environment key the supervisor uses to hand the per run
+/// token to the internal children it spawns, the unshare process
+/// and through it the init. The task never carries it, because
+/// the environment the supervisor builds is scrubbed to the
+/// allowlist and the init removes this key from its own
+/// environment before it supervises the task. The hidden
+/// assembly entry point refuses to run without a value of the
+/// token shape under this key, so it cannot be invoked directly
+/// on a host by accident and perform its mounts there.
+pub const INTERNAL_TOKEN_ENV: &str = "MAYFLY_INTERNAL_TOKEN";
+
+/// Whether a value has the shape of a per run token, thirty two
+/// lowercase hexadecimal characters, the shape the token
+/// generator produces.
+pub fn token_shape_ok(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// The run id a directory's provenance file records, or None.
 ///
 /// Every failure shape reads as no provenance at all, because
@@ -518,7 +598,10 @@ pub fn write_provenance(sandbox_dir: &Path, run_id: &str) -> io::Result<()> {
 /// also when it lists but not one command line in it can be
 /// read, because a table that cannot be read in substance says
 /// nothing about which runs are live and must never read as an
-/// empty one. A read that fails because the process vanished
+/// empty one. A listing that fails part way is unknown in the
+/// same way, because the entries it never reached may name the
+/// path and a partial list treated as complete could read a
+/// live run as dead. A read that fails because the process vanished
 /// between the listing and the read is ordinary and is passed
 /// over. A read refused for any other reason also makes the
 /// answer None, because the one entry withheld may be the one
@@ -532,7 +615,7 @@ pub fn pids_referencing_in(proc_dir: &Path, path: &Path) -> Option<Vec<u32>> {
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(_) => return None,
         };
         let name = entry.file_name();
         let name_bytes = name.as_bytes();
@@ -594,7 +677,11 @@ pub const ORPHAN_GRACE_SECONDS: f64 = 5.0;
 /// older than the grace period, so a run still being prepared
 /// by a concurrent process is never touched, and only when no
 /// live process names it, so a live run of any age keeps its
-/// sandbox. Where the process table cannot be listed, liveness
+/// sandbox. A directory position is judged by the entry standing
+/// there itself and never through a link it may be, so a symlink
+/// planted at a run directory position is neither read through
+/// nor removed, because the sweep never decides from data
+/// outside the run root. Where the process table cannot be listed, liveness
 /// is unknown and nothing is swept. A clean marker whose run
 /// directory is already gone is swept on the same terms. A
 /// sweep failure never breaks the run that triggered it.
@@ -617,7 +704,13 @@ fn sweep_one(root: &Path, proc_dir: &Path, entry: &Path, now_secs: f64) {
         Some(n) => n.to_string(),
         None => return,
     };
-    if entry.is_dir() && name.starts_with("run-") {
+    // Only a real directory standing at the position counts. A
+    // symlink there is skipped whole, its target never read and
+    // the link itself never removed, whatever stands behind it.
+    let is_real_dir = std::fs::symlink_metadata(entry)
+        .map(|meta| meta.file_type().is_dir())
+        .unwrap_or(false);
+    if is_real_dir && name.starts_with("run-") {
         let mtime = match entry.metadata().and_then(|m| m.modified()) {
             Ok(t) => t
                 .duration_since(std::time::UNIX_EPOCH)
@@ -683,13 +776,21 @@ static SIGNAL_FIRST: AtomicI32 = AtomicI32::new(0);
 static SIGNAL_FIRST_TIME: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn record_signal(signum: i32) {
-    if SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst) == 0 {
-        SIGNAL_FIRST.store(signum, Ordering::SeqCst);
-        SIGNAL_FIRST_TIME.store(now().to_bits(), Ordering::SeqCst);
+    // The snapshot is stored before the count moves, and the
+    // count store releases it, so a reader that acquires a
+    // nonzero count always sees the first signal and its stamp
+    // whole, and never a count standing over an unstamped zero.
+    if SIGNAL_COUNT.load(Ordering::SeqCst) == 0 {
+        SIGNAL_FIRST.store(signum, Ordering::Release);
+        SIGNAL_FIRST_TIME.store(now().to_bits(), Ordering::Release);
     }
+    SIGNAL_COUNT.fetch_add(1, Ordering::Release);
 }
 
 fn is_main_thread() -> bool {
+    // gettid and getpid are plain queries with no pointer or
+    // lifetime contract, and their results are compared as
+    // integers only.
     unsafe { libc::syscall(libc::SYS_gettid) == libc::getpid() as i64 }
 }
 
@@ -706,6 +807,11 @@ impl SignalGuard {
         SIGNAL_COUNT.store(0, Ordering::SeqCst);
         SIGNAL_FIRST.store(0, Ordering::SeqCst);
         SIGNAL_FIRST_TIME.store(0, Ordering::SeqCst);
+        // The action struct is fully initialised before the
+        // call, the handler is a plain extern function that
+        // touches only the atomics above, and the previous
+        // actions are written into owned storage the guard
+        // keeps for its restore.
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = record_signal as usize;
@@ -725,12 +831,12 @@ impl SignalGuard {
     }
 
     pub fn interrupted(&self) -> bool {
-        self.installed && SIGNAL_COUNT.load(Ordering::SeqCst) > 0
+        self.installed && SIGNAL_COUNT.load(Ordering::Acquire) > 0
     }
 
     pub fn first(&self) -> Option<i32> {
         if self.interrupted() {
-            Some(SIGNAL_FIRST.load(Ordering::SeqCst))
+            Some(SIGNAL_FIRST.load(Ordering::Acquire))
         } else {
             None
         }
@@ -738,7 +844,7 @@ impl SignalGuard {
 
     pub fn first_time(&self) -> Option<f64> {
         if self.interrupted() {
-            Some(f64::from_bits(SIGNAL_FIRST_TIME.load(Ordering::SeqCst)))
+            Some(f64::from_bits(SIGNAL_FIRST_TIME.load(Ordering::Acquire)))
         } else {
             None
         }
@@ -750,6 +856,10 @@ impl Drop for SignalGuard {
         if !self.installed {
             return;
         }
+        // The restored actions are the exact structs sigaction
+        // handed back at install time, kept unmodified in the
+        // guard, so restoring them returns the thread to the
+        // handlers it had before the guard.
         unsafe {
             if let Some(prev) = self.prev_int.take() {
                 libc::sigaction(libc::SIGINT, &prev, std::ptr::null_mut());

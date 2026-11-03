@@ -91,7 +91,11 @@ fn readme_status_states_one_of_one_hundred() {
     let text = read("README.md");
     assert!(text.contains("## Status"));
     let status = status_section(&text);
-    assert!(status.contains("1 of 100"));
+    // The full sentence, never the bare count, because the
+    // bare count is a substring of every two digit count that
+    // ends in the same digit and a pin on it would pass over
+    // a wrong statement of the closed rounds.
+    assert!(status.contains("Closed perfection rounds are 1 of 100."));
     assert!(status.contains("ca5df488b41c75114a08b752aaa0ed2eae255c92"));
 }
 
@@ -176,6 +180,33 @@ fn ci_runs_the_local_gate_commands() {
     assert!(commands.iter().any(|c| c == SCAN_COMMAND));
     assert!(commands.iter().any(|c| c == FMT_COMMAND));
     assert!(commands.iter().any(|c| c == CLIPPY_COMMAND));
+}
+
+#[test]
+fn ci_carries_the_fleet_credential_hygiene() {
+    let text = read(".github/workflows/ci.yml");
+    // The workflow asks for no more than it uses. Its token
+    // is limited to reading the repository, the checkout
+    // leaves no credential behind for later steps, and the
+    // toolchain action is pinned to a full commit SHA rather
+    // than a moving branch name.
+    assert!(text.contains("permissions:"));
+    assert!(text.contains("contents: read"));
+    assert!(text.contains("persist-credentials: false"));
+    assert!(!text.contains("rust-toolchain@master"));
+    let toolchain_line = text
+        .lines()
+        .find(|line| line.contains("dtolnay/rust-toolchain@"))
+        .expect("the workflow carries no toolchain step");
+    let pin = toolchain_line
+        .split("dtolnay/rust-toolchain@")
+        .nth(1)
+        .unwrap()
+        .trim();
+    assert_eq!(pin.len(), 40, "{}", toolchain_line);
+    assert!(pin
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
 }
 
 #[test]

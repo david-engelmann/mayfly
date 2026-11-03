@@ -11,6 +11,13 @@
 //! points the sweep uses. The none element a Python command
 //! list can carry is a NUL byte inside an argument here, which
 //! no exec can carry either, and it lands on the same refusal.
+//! The outcome and the timing phases are typed values in the
+//! crate rather than the strings the report prints, so the
+//! pins name them as Outcome and Phase values where the Python
+//! suite compared the printed strings, a mechanical
+//! consequence of the typing change in the crate. The printed
+//! report is unchanged, and the command line pins go on
+//! comparing the printed strings in the json they parse.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -26,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use mayfly::cli::cli_main;
 use mayfly::{
-    pids_referencing, pids_referencing_in, sweep_orphans_in, NamespaceBackend, RunReport, RunSpec,
-    HARNESS_EXIT_CODE, TAIL_CHARS,
+    pids_referencing, pids_referencing_in, sweep_orphans_in, NamespaceBackend, Outcome, Phase,
+    RunReport, RunSpec, HARNESS_EXIT_CODE, TAIL_CHARS,
 };
 
 fn root() -> PathBuf {
@@ -323,7 +330,7 @@ fn synthetic_probe_report(error: Option<&str>, stderr_tail: &str) -> RunReport {
         "probe0000000",
         "/nonexistent",
         py_cmd("pass"),
-        "harness_error",
+        Outcome::HarnessError,
     );
     report.error = error.map(|text| text.to_string());
     report.stderr_tail = stderr_tail.to_string();
@@ -336,7 +343,7 @@ fn probe_core(runner: &dyn Fn(Vec<OsString>, &Path) -> RunReport) -> (bool, Stri
     std::fs::create_dir_all(&probe_root).unwrap();
     let report = runner(py_cmd("pass"), &probe_root);
     let _ = std::fs::remove_dir_all(&probe_root);
-    if report.outcome == "task" {
+    if report.outcome == Outcome::Task {
         return (true, String::new());
     }
     let refusal = [
@@ -509,14 +516,14 @@ fn run_report_carries_the_phases_and_the_outcome() {
         tmp.path(),
     );
     assert_eq!(report.backend, "namespace");
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert_eq!(report.task_exit_code, Some(0));
     assert_eq!(report.task_signal, None);
     assert!(report.stdout_tail.contains("hello"));
-    for phase in ["prepare", "start", "task", "teardown", "total"] {
+    for phase in Phase::ALL {
         let value = report.timings_ms.get(phase);
-        assert!(value.is_some(), "{}", phase);
-        assert!(value.unwrap() > 0.0, "{}", phase);
+        assert!(value.is_some(), "{}", phase.name());
+        assert!(value.unwrap() > 0.0, "{}", phase.name());
     }
     assert!(report.timings_ms.task.unwrap() >= 200.0);
     assert!(report.proc_mounted.is_some());
@@ -529,7 +536,7 @@ fn task_exit_code_is_reported_exactly() {
     }
     let tmp = Tmp::new("exit-code");
     let report = run_task(py_cmd("import sys; sys.exit(7)"), tmp.path());
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert_eq!(report.task_exit_code, Some(7));
     assert_eq!(report.task_signal, None);
 }
@@ -544,7 +551,7 @@ fn task_killed_by_a_signal_is_reported_as_a_signal() {
         py_cmd("import os, signal; os.kill(os.getpid(), signal.SIGTERM)"),
         tmp.path(),
     );
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert_eq!(report.task_exit_code, None);
     assert_eq!(report.task_signal, Some(15));
 }
@@ -556,7 +563,7 @@ fn a_task_exiting_at_125_is_a_task_outcome() {
     }
     let tmp = Tmp::new("exit-125");
     let report = run_task(py_cmd("import sys; sys.exit(125)"), tmp.path());
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert_eq!(report.task_exit_code, Some(125));
 }
 
@@ -564,7 +571,7 @@ fn a_task_exiting_at_125_is_a_task_outcome() {
 fn a_command_that_cannot_start_is_a_harness_error() {
     let tmp = Tmp::new("cannot-start");
     let report = run_task(cmd(&["mayfly-no-such-binary-anywhere"]), tmp.path());
-    assert_eq!(report.outcome, "harness_error");
+    assert_eq!(report.outcome, Outcome::HarnessError);
     assert_eq!(report.task_exit_code, None);
     assert_eq!(report.task_signal, None);
     assert!(report.error.is_some());
@@ -576,7 +583,7 @@ fn a_missing_unshare_is_a_harness_error() {
     ensure_helper();
     let backend = NamespaceBackend::with_unshare_path(Some(PathBuf::from("/nonexistent/unshare")));
     let report = backend.run(&spec(py_cmd("pass"), tmp.path()));
-    assert_eq!(report.outcome, "harness_error");
+    assert_eq!(report.outcome, Outcome::HarnessError);
     assert_eq!(report.task_exit_code, None);
     assert_eq!(report.sandbox_removed, Some(true));
     assert!(dir_names(tmp.path()).is_empty());
@@ -715,7 +722,7 @@ fn no_process_from_the_task_tree_survives_teardown() {
     unsafe {
         libc::close(write_fd);
     }
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert_eq!(report.task_exit_code, Some(0));
     let mut data: Vec<u8> = Vec::new();
     let mut eof = false;
@@ -968,7 +975,7 @@ fn the_stderr_tail_carries_a_failing_task_stderr() {
     let tmp = Tmp::new("stderr-tail");
     let script = "import sys; sys.stderr.write('a named failure line' + chr(10)); sys.exit(3)";
     let report = run_task(py_cmd(script), tmp.path());
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert_eq!(report.task_exit_code, Some(3));
     assert!(report.stderr_tail.contains("a named failure line"));
 }
@@ -1139,7 +1146,7 @@ fn a_submount_of_a_bound_tree_is_read_only_inside() {
         probe_file.display()
     );
     let report = run_task(py_cmd(&script), tmp.path());
-    let outcome = report.outcome.clone();
+    let outcome = report.outcome;
     let errno = last_json(&report)["errno"].clone();
     let probe_exists = probe_file.exists();
     let _ = Command::new("umount")
@@ -1148,7 +1155,7 @@ fn a_submount_of_a_bound_tree_is_read_only_inside() {
         .stderr(Stdio::null())
         .status();
     let _ = std::fs::remove_dir(&probe_dir);
-    assert_eq!(outcome, "task");
+    assert_eq!(outcome, Outcome::Task);
     assert_eq!(errno, 30);
     assert!(!probe_exists);
 }
@@ -1158,7 +1165,7 @@ fn a_command_with_a_nul_byte_is_a_harness_error() {
     let tmp = Tmp::new("nul-byte");
     let bad = OsString::from_vec(b"mayfly-bad\0command".to_vec());
     let report = run_task(vec![bad], tmp.path());
-    assert_eq!(report.outcome, "harness_error");
+    assert_eq!(report.outcome, Outcome::HarnessError);
     assert_eq!(report.task_exit_code, None);
     assert!(report.error.is_some());
 }
@@ -1169,7 +1176,7 @@ fn a_prepare_failure_report_carries_the_full_shape() {
     let blocker = tmp.path().join("a-file-not-a-directory");
     std::fs::write(&blocker, "standing in the way").unwrap();
     let report = run_task(py_cmd("pass"), &blocker);
-    assert_eq!(report.outcome, "harness_error");
+    assert_eq!(report.outcome, Outcome::HarnessError);
     assert!(report.error.is_some());
     assert_eq!(report.proc_mounted, Some(false));
     assert!(report.sandbox_removed.is_some());
@@ -1189,7 +1196,7 @@ fn a_large_task_output_is_bounded_to_its_tail() {
         sys.stdout.write('x' * 300000)\n\
         sys.stdout.write('the-end-marker')\n";
     let report = run_task(py_cmd(script), tmp.path());
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert!(report.stdout_tail.chars().count() <= TAIL_CHARS);
     assert!(report.stdout_tail.ends_with("the-end-marker"));
 }
@@ -1356,7 +1363,7 @@ fn a_clean_run_leaves_no_marker_and_no_sandbox() {
     }
     let tmp = Tmp::new("clean-run");
     let report = run_task(py_cmd("print('done')"), tmp.path());
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert_eq!(report.sandbox_removed, Some(true));
     assert!(dir_names(tmp.path()).is_empty());
 }
@@ -1386,7 +1393,7 @@ fn a_later_run_sweeps_an_orphan_whose_janitor_also_died() {
     assert!(sandbox.exists());
     age_directory(&sandbox, 60.0);
     let report = run_task(py_cmd("pass"), tmp.path());
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert!(!sandbox.exists());
     assert!(dir_names(tmp.path()).is_empty());
 }
@@ -1404,7 +1411,7 @@ fn the_sweep_never_touches_a_live_run() {
     let sandbox = sandboxes[0].clone();
     age_directory(&sandbox, 60.0);
     let report = run_task(py_cmd("pass"), tmp.path());
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert!(sandbox.exists());
     assert!(!host_pids_with_marker(&marker).is_empty());
     signal_child(&proc, libc::SIGTERM);
@@ -1463,7 +1470,7 @@ fn a_sandbox_that_dies_before_the_task_starts_keeps_the_plain_report() {
     ensure_helper();
     let backend = NamespaceBackend::with_unshare_path(Some(fake_unshare));
     let report = backend.run(&spec(py_cmd("pass"), &root_dir));
-    assert_eq!(report.outcome, "harness_error");
+    assert_eq!(report.outcome, Outcome::HarnessError);
     assert!(
         report
             .error
@@ -1587,7 +1594,7 @@ fn a_run_refuses_a_standing_run_directory_and_leaves_it_standing() {
     let before = snapshot_tree(&sandbox);
     let report = run_with_a_fixed_run_id(run_id, tmp.path());
     assert_eq!(report.run_id, run_id);
-    assert_eq!(report.outcome, "harness_error");
+    assert_eq!(report.outcome, Outcome::HarnessError);
     assert!(report
         .error
         .as_deref()
@@ -1612,7 +1619,7 @@ fn a_run_refuses_a_standing_rootfs_and_leaves_it_standing() {
     let before = snapshot_tree(&sandbox);
     let report = run_with_a_fixed_run_id(run_id, tmp.path());
     assert_eq!(report.run_id, run_id);
-    assert_eq!(report.outcome, "harness_error");
+    assert_eq!(report.outcome, Outcome::HarnessError);
     assert!(report
         .error
         .as_deref()
@@ -1768,7 +1775,7 @@ fn the_sweep_leaves_a_foreign_run_directory_standing() {
     std::fs::write(foreign.join("not-mayfly.txt"), "not a mayfly sandbox").unwrap();
     age_directory(&foreign, 60.0);
     let report = run_task(py_cmd("pass"), &root_dir);
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert_eq!(
         std::fs::read_to_string(foreign.join("not-mayfly.txt")).unwrap(),
         "not a mayfly sandbox"
@@ -1788,7 +1795,7 @@ fn the_sweep_leaves_a_directory_whose_provenance_names_another_run() {
     std::fs::write(foreign.join(".mayfly-provenance"), "bbbb00000002\n").unwrap();
     age_directory(&foreign, 60.0);
     let report = run_task(py_cmd("pass"), &root_dir);
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert!(foreign.exists());
     assert_eq!(glob_run_dirs(&root_dir), vec![foreign]);
 }
@@ -1805,12 +1812,52 @@ fn a_provenance_with_bytes_that_are_not_text_leaves_the_directory_standing() {
     std::fs::write(planted.join(".mayfly-provenance"), b"\xff\xfe\x00binary").unwrap();
     age_directory(&planted, 60.0);
     let report = run_task(py_cmd("pass"), &root_dir);
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert_eq!(
         std::fs::read(planted.join(".mayfly-provenance")).unwrap(),
         b"\xff\xfe\x00binary"
     );
     assert_eq!(glob_run_dirs(&root_dir), vec![planted]);
+}
+
+#[test]
+fn the_sweep_leaves_a_symlink_at_a_run_directory_position_standing() {
+    // The red team shape. A symlink stands at a run directory
+    // position in the run root, naming a directory outside the
+    // root that carries a provenance file forged to name the
+    // link's own run id, aged past the grace period, with a
+    // process table that reads clean and names nothing live.
+    // The sweep judges the entry standing at the position
+    // itself and never through a link, so the directory behind
+    // the link keeps every byte and the link itself stands,
+    // where a sweep that followed the link would read the
+    // forged provenance as its own and unlink the link.
+    let tmp = Tmp::new("sweep-symlink");
+    let root_dir = tmp.path().join("root");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let victim = tmp.path().join("victim-dir");
+    std::fs::create_dir_all(&victim).unwrap();
+    std::fs::write(victim.join(".mayfly-provenance"), "eeee00000009\n").unwrap();
+    std::fs::write(victim.join("precious.txt"), "not mayfly data").unwrap();
+    let link = root_dir.join("run-eeee00000009");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    age_directory(&victim, 60.0);
+    let fake = fake_proc_table(
+        &tmp.path().join("fakeproc-link"),
+        &[("424242", FakeCmdline::Bytes(b"unrelated\0".to_vec()))],
+    );
+    sweep_orphans_in(&root_dir, &fake);
+    let meta = std::fs::symlink_metadata(&link).unwrap();
+    assert!(meta.file_type().is_symlink());
+    assert_eq!(std::fs::read_link(&link).unwrap(), victim);
+    assert_eq!(
+        std::fs::read_to_string(victim.join("precious.txt")).unwrap(),
+        "not mayfly data"
+    );
+    assert_eq!(
+        std::fs::read_to_string(victim.join(".mayfly-provenance")).unwrap(),
+        "eeee00000009\n"
+    );
 }
 
 fn run_task_on_a_thread(
@@ -1851,7 +1898,7 @@ fn a_fifo_at_the_provenance_path_neither_hangs_nor_breaks_the_run() {
         .recv_timeout(Duration::from_secs(60))
         .expect("the triggered run hung on the planted pipe");
     let _ = handle.join();
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert!(planted.exists());
     assert_eq!(glob_run_dirs(&root_dir), vec![planted]);
 }
@@ -1901,7 +1948,7 @@ fn a_fifo_at_the_marker_path_does_not_block_a_clean_run() {
         .recv_timeout(Duration::from_secs(60))
         .expect("the clean run blocked on the planted pipe");
     let _ = handle.join();
-    assert_eq!(report.outcome, "task");
+    assert_eq!(report.outcome, Outcome::Task);
     assert_eq!(report.sandbox_removed, Some(true));
     assert!(dir_names(&root_dir).is_empty());
 }
@@ -1916,6 +1963,31 @@ fn the_janitor_reads_a_fifo_marker_as_no_token() {
     mkfifo(&marker);
     assert_eq!(drive_janitor(&sandbox, &marker, &"ab".repeat(16)), 0);
     assert!(!sandbox.exists());
+}
+
+#[test]
+fn a_symlink_at_the_marker_path_is_never_written_through() {
+    // The runner leaves the clean marker through the marker
+    // write. A symlink planted at the marker path, naming a
+    // file outside the run root, must leave that file byte
+    // identical and the write skipped, with the link itself
+    // left standing for the janitor to remove in its cleanup.
+    // A write that reaches the named file, whether by opening
+    // through the link or by replacing the link with a written
+    // marker of its own, fails this pin.
+    let tmp = Tmp::new("marker-symlink");
+    let victim = tmp.path().join("victim.txt");
+    std::fs::write(&victim, "the file outside the run root\n").unwrap();
+    let marker = tmp.path().join(".mayfly-clean-eeee00000008");
+    std::os::unix::fs::symlink(&victim, &marker).unwrap();
+    mayfly::namespace::write_clean_marker(&marker, &"ab".repeat(16));
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        b"the file outside the run root\n"
+    );
+    let meta = std::fs::symlink_metadata(&marker).unwrap();
+    assert!(meta.file_type().is_symlink());
+    assert_eq!(std::fs::read_link(&marker).unwrap(), victim);
 }
 
 #[test]
@@ -2258,7 +2330,7 @@ fn a_command_with_a_none_element_is_a_harness_error() {
     let tmp = Tmp::new("none-element");
     let bad = OsString::from_vec(b"bad\0arg".to_vec());
     let report = run_task(vec![py(), bad], tmp.path());
-    assert_eq!(report.outcome, "harness_error");
+    assert_eq!(report.outcome, Outcome::HarnessError);
     assert_eq!(report.task_exit_code, None);
     assert_eq!(report.task_signal, None);
     assert!(report.error.is_some());
@@ -2302,6 +2374,58 @@ fn cli_reports_a_none_command_element_as_a_harness_error() {
     assert_eq!(payload["task_signal"], serde_json::Value::Null);
 }
 
+#[test]
+fn cli_treats_an_option_shaped_token_after_a_value_option_as_a_missing_value() {
+    // The argparse command line of Round 1 refused an option
+    // shaped token where a value belongs, and the Rust parser
+    // keeps the refusal. An option followed by another option
+    // or by the separator is missing its value, the entry
+    // exits 2 with the missing value error, and nothing runs
+    // and nothing is prepared anywhere.
+    ensure_helper();
+    let tmp = Tmp::new("cli-missing-value");
+    let shapes: Vec<(Vec<OsString>, &str)> = vec![
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                os("--net"),
+                os("--"),
+                py(),
+                os("-c"),
+                os("pass"),
+            ],
+            "mayfly run needs a value after --root",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                tmp.path().as_os_str().to_os_string(),
+                os("--allow-env"),
+                os("--"),
+                py(),
+                os("-c"),
+                os("pass"),
+            ],
+            "mayfly run needs a value after --allow-env",
+        ),
+    ];
+    for (args, message) in shapes {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = cli_main(&args, &mut out, &mut err);
+        assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
+        assert!(
+            String::from_utf8_lossy(&err).contains(message),
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        assert!(out.is_empty());
+    }
+    assert!(glob_run_dirs(tmp.path()).is_empty());
+}
+
 // ---------- the init driven directly ----------
 
 fn unshare_path() -> PathBuf {
@@ -2316,6 +2440,68 @@ fn unshare_path() -> PathBuf {
 }
 
 #[test]
+fn the_assemble_root_drive_refuses_without_the_internal_token() {
+    // The hidden assembly drive performs its mounts in the
+    // mount namespace of whatever invokes it, so it refuses
+    // to run at all without the internal run token in its
+    // environment, and a refusal performs no assembly and
+    // creates nothing. Driven directly here, on the host and
+    // outside any namespace, with the token key removed from
+    // the environment the child inherits.
+    let tmp = Tmp::new("assemble-refusal");
+    let sandbox = tmp.path().join("run-refuse000001");
+    let rootfs = sandbox.join("rootfs");
+    let output = Command::new(mayfly_bin())
+        .arg("__assemble-root")
+        .arg("--rootfs")
+        .arg(rootfs.as_os_str())
+        .env_remove(mayfly::INTERNAL_TOKEN_ENV)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("refuses to run without the internal run token"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!rootfs.exists());
+    assert!(!sandbox.exists());
+}
+
+#[test]
+fn the_mount_point_parse_decodes_the_kernel_octal_escapes() {
+    // The mounts table escapes a space in a mount point as a
+    // backslash followed by three octal digits, and likewise
+    // a tab and a newline and a backslash itself. The fallback
+    // walk compares decoded paths against the real target, so
+    // a tree bound under an escaped path is found and
+    // remounted read only instead of passing unremounted
+    // under a report of success. A backslash that does not
+    // lead three octal digits stands as itself.
+    assert_eq!(
+        mayfly::init::decode_mount_point(r"/tmp/mayfly\040root/run-a/rootfs/usr"),
+        "/tmp/mayfly root/run-a/rootfs/usr"
+    );
+    assert_eq!(
+        mayfly::init::decode_mount_point(r"/a\011b\012c\134d"),
+        "/a\tb\nc\\d"
+    );
+    assert_eq!(
+        mayfly::init::decode_mount_point("/plain/path"),
+        "/plain/path"
+    );
+    assert_eq!(
+        mayfly::init::decode_mount_point(r"/short\04x"),
+        r"/short\04x"
+    );
+    assert_eq!(
+        mayfly::init::decode_mount_point(r"/digit\089"),
+        r"/digit\089"
+    );
+}
+
+#[test]
 fn the_init_leaves_provenance_beside_an_assembled_root() {
     if !require_sandbox() {
         return;
@@ -2325,6 +2511,10 @@ fn the_init_leaves_provenance_beside_an_assembled_root() {
     // the provenance. The residue a killed prepare leaves is
     // whatever this assembly created, and it must carry the
     // provenance the sweep trusts or no sweep will collect it.
+    // The drive presents the internal run token in its
+    // environment, the way the supervisor presents it to the
+    // children it spawns, because the drive refuses to run
+    // without it.
     let tmp = Tmp::new("init-provenance");
     let sandbox = tmp.path().join("run-seam00000001");
     let rootfs = sandbox.join("rootfs");
@@ -2342,6 +2532,7 @@ fn the_init_leaves_provenance_beside_an_assembled_root() {
         .arg("__assemble-root")
         .arg("--rootfs")
         .arg(rootfs.as_os_str())
+        .env(mayfly::INTERNAL_TOKEN_ENV, "ab".repeat(16))
         .output()
         .unwrap();
     assert!(
@@ -2650,7 +2841,7 @@ fn a_run_killed_inside_prepare_leaves_nothing_unsweepable() {
             break;
         }
         let report = run_task(py_cmd("pass"), &root_dir);
-        assert_eq!(report.outcome, "task");
+        assert_eq!(report.outcome, Outcome::Task);
     }
     assert!(glob_run_dirs(&root_dir).is_empty());
     assert!(glob_clean_markers(&root_dir).is_empty());

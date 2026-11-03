@@ -85,6 +85,9 @@ pub fn real_mount(
     let src = source.map(cstring);
     let fs = fstype.map(cstring);
     let tgt = cstring(target);
+    // Every pointer is either null or borrowed from a CString
+    // this call owns and keeps alive until the call returns,
+    // and the flags are plain values.
     let rc = unsafe {
         libc::mount(
             src.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
@@ -106,6 +109,37 @@ pub fn real_mount(
     Ok(())
 }
 
+/// Decode the escapes the kernel writes into a mount point
+/// field of the mounts table. A space in a mount point stands
+/// in the table as a backslash followed by three octal digits,
+/// and so do a tab and a newline and a backslash itself, so a
+/// literal comparison against the real path never matches a
+/// tree bound under an escaped path. Anything that is not a
+/// backslash followed by three octal digits stands as itself.
+pub fn decode_mount_point(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\'
+            && index + 3 < bytes.len()
+            && matches!(bytes[index + 1], b'0'..=b'7')
+            && matches!(bytes[index + 2], b'0'..=b'7')
+            && matches!(bytes[index + 3], b'0'..=b'7')
+        {
+            let value = (bytes[index + 1] - b'0') * 64
+                + (bytes[index + 2] - b'0') * 8
+                + (bytes[index + 3] - b'0');
+            out.push(value);
+            index += 4;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Set the read only flag on a bound tree and every submount.
 ///
 /// The recursive mount_setattr call carries the claim where the
@@ -118,6 +152,9 @@ fn remount_read_only_tree(target: &str, mounts: &MountFn) -> Result<(), String> 
         // set mask in the first word and the size passed as 40.
         let attr: [u64; 5] = [MOUNT_ATTR_RDONLY, 0, 0, 0, 0];
         let tgt = cstring(target);
+        // The structure is a plain array of words whose layout
+        // the call defines, the target string outlives the call,
+        // and the kernel reads both only for the call's duration.
         let rc = unsafe {
             libc::syscall(
                 number,
@@ -138,7 +175,7 @@ fn remount_read_only_tree(target: &str, mounts: &MountFn) -> Result<(), String> 
     for line in mounts_text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() >= 2 {
-            points.push(fields[1].to_string());
+            points.push(decode_mount_point(fields[1]));
         }
     }
     let under: Vec<String> = points
@@ -271,6 +308,9 @@ pub fn enter_root(rootfs: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&oldroot).map_err(|err| py_os_error_path(&err, &oldroot))?;
     let new_root = cstring(&rootfs_text);
     let put_old = cstring(&oldroot.to_string_lossy());
+    // Both paths are CStrings owned here and alive for the
+    // call, and the syscall number was resolved for this
+    // architecture before the call.
     let rc = unsafe { libc::syscall(number, new_root.as_ptr(), put_old.as_ptr()) };
     if rc != 0 {
         let errno = errno_now();
@@ -283,6 +323,9 @@ pub fn enter_root(rootfs: &Path) -> Result<(), String> {
     }
     std::env::set_current_dir("/").map_err(|err| py_os_error_path(&err, Path::new("/")))?;
     let old = cstring("/.oldroot");
+    // The path is a CString owned here and the detach flag is
+    // a plain value, and the old root was just placed there by
+    // the pivot above.
     let rc = unsafe { libc::umount2(old.as_ptr(), MNT_DETACH) };
     if rc != 0 {
         let errno = errno_now();
@@ -319,6 +362,9 @@ struct CapData {
 /// the errno and its message, in the shape the exec error pipe
 /// reports.
 fn drop_capabilities() -> Result<(), (i32, String)> {
+    // The header and data are repr C structs built to the
+    // kernel layout for version 3 and owned by this call, and
+    // the prctl drops pass plain capability numbers only.
     unsafe {
         for cap in 0..64 {
             libc::prctl(PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0);
@@ -348,6 +394,9 @@ fn status(status_fd: i32, event: serde_json::Value) {
     }
     let mut line = serde_json::to_string(&payload).unwrap_or_default();
     line.push('\n');
+    // The buffer is the line just built and outlives the write,
+    // and the descriptor is the status descriptor the init was
+    // handed for exactly these writes.
     unsafe {
         libc::write(status_fd, line.as_ptr() as *const libc::c_void, line.len());
     }
@@ -383,6 +432,9 @@ fn watch_supervisor(status_fd: i32, child_slot: Arc<AtomicI32>) {
             events: 0,
             revents: 0,
         };
+        // The pollfd is owned here and the call writes only its
+        // revents field, and the pid killed is the task child
+        // the init itself forked and stored in the slot.
         let rc = unsafe { libc::poll(&mut pfd, 1, 200) };
         if rc < 0 {
             return;
@@ -398,6 +450,8 @@ fn watch_supervisor(status_fd: i32, child_slot: Arc<AtomicI32>) {
 
 fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
     let mut pipe_fds: [i32; 2] = [0, 0];
+    // The array is owned by this call and holds exactly the two
+    // descriptors pipe2 promises to write.
     if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return 1;
     }
@@ -413,8 +467,22 @@ fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
     let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|arg| arg.as_ptr()).collect();
     argv_ptrs.push(std::ptr::null());
     let file_ptr = argv_ptrs[0];
+    // The fork is the one place the init multiplies itself, and
+    // everything the child touches on its way to exec was built
+    // above, before the fork, the argument strings and their
+    // pointer vector and the pipe descriptors. The child calls
+    // only async signal safe functions, close and the capability
+    // drop and execvp and a write of plain bytes and _exit, and
+    // allocates nothing, so no lock or buffer the parent holds
+    // can be met in a copied and locked state. The parent keeps
+    // ownership of the argument storage and drops it only after
+    // its own copies of the pipe ends are closed.
     let child = unsafe { libc::fork() };
     if child == 0 {
+        // In the child. Every call here is on descriptors this
+        // function created, and the exec replaces the process
+        // image whole on success, so no Rust state past this
+        // point is ever observed by the child.
         unsafe {
             libc::close(read_fd);
             libc::close(status_fd);
@@ -446,10 +514,17 @@ fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
         let slot = Arc::clone(&child_slot);
         std::thread::spawn(move || watch_supervisor(status_fd, slot));
     }
+    // The write end is this function's own descriptor and the
+    // child holds its copy already, so closing here is what
+    // makes the read below report the child's exec by its
+    // silence.
     unsafe {
         libc::close(write_fd);
     }
     let mut report_buf = [0u8; 4096];
+    // The buffer is owned here and sized to the read, and the
+    // descriptor is the read end of the exec pipe the child
+    // writes its one failure report to.
     let read_count = unsafe {
         libc::read(
             read_fd,
@@ -457,11 +532,15 @@ fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
             report_buf.len(),
         )
     };
+    // The read end is closed exactly once, here, after the one
+    // read the protocol makes on it.
     unsafe {
         libc::close(read_fd);
     }
     if read_count > 0 {
         let mut status_word: i32 = 0;
+        // The status word is owned storage, and the child is
+        // the one this function forked and has not yet reaped.
         unsafe {
             libc::waitpid(child, &mut status_word, 0);
         }
@@ -473,6 +552,9 @@ fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
     let mut signal_no: Option<i32> = None;
     loop {
         let mut status_word: i32 = 0;
+        // The status word is owned storage, and the wait is on
+        // any child of this init, which has exactly the task
+        // tree under it.
         let pid = unsafe { libc::waitpid(-1, &mut status_word, 0) };
         if pid < 0 {
             let errno = errno_now();
@@ -492,6 +574,9 @@ fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
     }
     loop {
         let mut status_word: i32 = 0;
+        // The same wait in its non blocking form, draining any
+        // grandchildren the task left behind so none of them is
+        // left unreaped under this init.
         let pid = unsafe { libc::waitpid(-1, &mut status_word, libc::WNOHANG) };
         if pid <= 0 {
             break;
@@ -522,6 +607,8 @@ fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
 
 fn set_hostname() -> Result<(), String> {
     let name = cstring(HOSTNAME);
+    // The name is a CString owned here and its length is the
+    // constant's own length, so the pointer and length agree.
     let rc = unsafe { libc::sethostname(name.as_ptr(), HOSTNAME.len()) };
     if rc != 0 {
         let errno = errno_now();
@@ -540,8 +627,40 @@ fn opt_value<'a>(opts: &'a [OsString], name: &str) -> Option<&'a OsString> {
 /// subcommand of the mayfly binary with the argv the unshare
 /// call built.
 pub fn init_main(args: &[OsString]) -> i32 {
-    unsafe {
-        libc::prctl(PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0);
+    // Arm the parent death signal before anything else, so an
+    // init whose supervisor dies at any later point in the
+    // assembly or the supervision dies with it. A failure to
+    // arm is an init failure reported like any other, never a
+    // run that continues unarmed, and the report goes to the
+    // status descriptor the arguments carry where they carry
+    // one. No check that the parent still lives follows the
+    // arming. Inside the pid namespace the init is pid 1 and
+    // its parent stands outside the namespace, so a parent
+    // reading cannot tell a live supervisor from a dead one,
+    // and the arming itself closes the race the check would
+    // chase, because a parent already gone when the signal is
+    // armed delivers the signal at once.
+    // The call passes plain scalar arguments only and writes
+    // nothing through a pointer.
+    let armed = unsafe { libc::prctl(PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0) };
+    if armed != 0 {
+        let errno = errno_now();
+        let detail = format!(
+            "the parent death signal could not be armed, [Errno {}] {}",
+            errno,
+            strerror(errno)
+        );
+        let opts_end = args
+            .iter()
+            .position(|arg| arg.as_os_str() == "--")
+            .unwrap_or(args.len());
+        return match opt_value(&args[..opts_end], "--status-fd")
+            .and_then(|value| value.to_str())
+            .and_then(|text| text.parse().ok())
+        {
+            Some(fd) => fail(fd, &detail),
+            None => 1,
+        };
     }
     let sep = match args.iter().position(|arg| arg.as_os_str() == "--") {
         Some(index) => index,
@@ -563,6 +682,12 @@ pub fn init_main(args: &[OsString]) -> i32 {
     if command.is_empty() {
         return fail(status_fd, "no command was given");
     }
+    // The internal token rode in with the environment the
+    // supervisor built. It has done its work of naming this
+    // process as one of the run's own children, and it leaves
+    // the environment here, before the assembly and the task,
+    // so no process inside the sandbox can read it.
+    std::env::remove_var(crate::INTERNAL_TOKEN_ENV);
     let assembled = assemble_root(&rootfs)
         .and_then(|proc_mounted| set_hostname().map(|_| proc_mounted))
         .and_then(|proc_mounted| enter_root(&rootfs).map(|_| proc_mounted))
@@ -587,7 +712,26 @@ pub fn init_main(args: &[OsString]) -> i32 {
 /// The assembly drive the test suite uses to run the assembly
 /// inside a real namespace with no runner, reached through
 /// the hidden __assemble-root subcommand.
+///
+/// The drive performs its mounts in the mount namespace of
+/// the process that invokes it, and unlike the init it does
+/// not unshare first, so invoked directly on a host it would
+/// mount into the host mount table. It therefore refuses to
+/// run unless the caller presents the internal run token, the
+/// per run value the supervisor places in the environment of
+/// its own children under the internal token key, in the
+/// token shape the generator produces. A caller who can set
+/// that environment already holds the mount privilege the
+/// assembly needs, so the gate is a guard against accident
+/// and not a boundary, and it is checked before any mount.
 pub fn assemble_root_main(args: &[OsString]) -> i32 {
+    match std::env::var(crate::INTERNAL_TOKEN_ENV) {
+        Ok(value) if crate::token_shape_ok(&value) => {}
+        _ => {
+            eprintln!("mayfly __assemble-root refuses to run without the internal run token");
+            return 1;
+        }
+    }
     let rootfs = match opt_value(args, "--rootfs") {
         Some(value) => PathBuf::from(value),
         None => return 1,

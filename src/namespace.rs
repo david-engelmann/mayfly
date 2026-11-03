@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use crate::{
     helper_exe, ms_since, now, py_os_error, py_os_error_path, round3, strerror, sweep_orphans,
-    write_provenance, RunReport, RunSpec, SignalGuard, TailBuffer, Timings,
+    write_provenance, Outcome, RunReport, RunSpec, SignalGuard, TailBuffer, Timings,
 };
 
 pub type ProvenanceWriter = dyn Fn(&Path, &str) -> io::Result<()> + Send + Sync;
@@ -61,6 +61,9 @@ struct JanitorHandle {
 
 fn pipe2_cloexec() -> io::Result<(RawFd, RawFd)> {
     let mut fds: [RawFd; 2] = [0, 0];
+    // The array is owned by this call and holds exactly the two
+    // descriptors pipe2 promises to write, and nothing reads
+    // them back unless the call reports success.
     let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
     if rc != 0 {
         return Err(io::Error::last_os_error());
@@ -69,6 +72,9 @@ fn pipe2_cloexec() -> io::Result<(RawFd, RawFd)> {
 }
 
 fn clear_cloexec(fd: RawFd) {
+    // The descriptor is one the caller owns and holds open for
+    // the child being spawned, and fcntl only reads and rewrites
+    // that descriptor's own flags.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFD);
         if flags >= 0 {
@@ -78,6 +84,8 @@ fn clear_cloexec(fd: RawFd) {
 }
 
 fn close_fd(fd: RawFd) {
+    // The descriptor is owned by the caller and closed exactly
+    // once on each path that reaches here.
     unsafe {
         libc::close(fd);
     }
@@ -118,16 +126,34 @@ fn hex_bytes(bytes: &[u8]) -> String {
     out
 }
 
-fn new_run_id() -> String {
-    let mut bytes = [0u8; 6];
-    let _ = getrandom::fill(&mut bytes);
-    hex_bytes(&bytes)
+/// Draw bytes from the system random source, carrying a
+/// failure as the io error the callers report.
+fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
+    getrandom::fill(bytes).map_err(|err| match err.raw_os_error() {
+        Some(code) => io::Error::from_raw_os_error(code),
+        None => io::Error::other("the system random source failed"),
+    })
 }
 
-fn new_token() -> String {
+/// A fresh run id from the system random source. A failure of
+/// that source is an error the caller reports, never a zeroed
+/// buffer quietly standing in for an id, because two runs
+/// handed the same zeroed id would collide on one directory
+/// and a zeroed token would authenticate a planted marker.
+fn new_run_id() -> io::Result<String> {
+    let mut bytes = [0u8; 6];
+    fill_random(&mut bytes)?;
+    Ok(hex_bytes(&bytes))
+}
+
+/// A fresh per run token from the same source, under the same
+/// rule. The token is the only thing that authenticates a
+/// clean marker to the janitor, so a token that was never
+/// random must never be issued at all.
+fn new_token() -> io::Result<String> {
     let mut bytes = [0u8; 16];
-    let _ = getrandom::fill(&mut bytes);
-    hex_bytes(&bytes)
+    fill_random(&mut bytes)?;
+    Ok(hex_bytes(&bytes))
 }
 
 /// Leave the clean marker carrying this run's token.
@@ -137,17 +163,27 @@ fn new_token() -> String {
 /// would block the finish past the end of the task. The
 /// planted object itself is all the unlink ever touches, the
 /// file a planted symlink names is never opened or removed.
-/// Where the planted object cannot be removed, the write is
-/// skipped and the run still finishes cleanly, and the janitor
-/// completes the cleanup in the runner's place when it sees
-/// its supervisor gone with no valid marker, removing a
-/// sandbox that is already gone as a no-op. The write itself
-/// cannot block either, so a pipe swapped into the path after
-/// the check fails the open instead of hanging on it.
-fn write_clean_marker(marker: &Path, token: &str) {
+/// A symlink planted at the path is not unlinked either. It
+/// is left standing and the write is skipped, because the
+/// open refuses to follow it, so nothing at the path can make
+/// the write land on a file outside the run root, and the
+/// janitor removes the link when it completes the cleanup in
+/// the runner's place. Where the planted object cannot be
+/// removed, the write is skipped and the run still finishes
+/// cleanly, and the janitor completes the cleanup in the
+/// runner's place when it sees its supervisor gone with no
+/// valid marker, removing a sandbox that is already gone as a
+/// no-op. The write itself cannot block either, so a pipe
+/// swapped into the path after the check fails the open
+/// instead of hanging on it.
+pub fn write_clean_marker(marker: &Path, token: &str) {
     use std::os::unix::fs::OpenOptionsExt;
     if let Ok(meta) = std::fs::symlink_metadata(marker) {
-        if !meta.file_type().is_file() && std::fs::remove_file(marker).is_err() {
+        let file_type = meta.file_type();
+        if file_type.is_symlink() {
+            return;
+        }
+        if !file_type.is_file() && std::fs::remove_file(marker).is_err() {
             return;
         }
     }
@@ -155,7 +191,7 @@ fn write_clean_marker(marker: &Path, token: &str) {
         .write(true)
         .create(true)
         .truncate(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
         .mode(0o644)
         .open(marker);
     if let Ok(mut file) = opened {
@@ -167,6 +203,22 @@ impl Default for NamespaceBackend {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Everything one run hands down its own pipeline, gathered
+/// into one value so the phases pass the run between them
+/// instead of threading the same parameters through every call.
+struct RunContext<'a> {
+    spec: &'a RunSpec,
+    sandbox_dir: &'a Path,
+    report: &'a mut RunReport,
+    timings: &'a mut Timings,
+    marker: &'a Path,
+    guard: &'a SignalGuard,
+    run_id: &'a str,
+    token: &'a str,
+    /// The stamp the prepare phase is timed from.
+    phase: f64,
 }
 
 impl NamespaceBackend {
@@ -278,6 +330,10 @@ impl NamespaceBackend {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // The closure runs in the forked child between fork and
+        // exec, where it only calls async signal safe functions
+        // on the descriptor it was handed, which the parent
+        // created for exactly this child and no one else holds.
         unsafe {
             cmd.pre_exec(move || {
                 if libc::setsid() == -1 {
@@ -323,7 +379,34 @@ impl NamespaceBackend {
     pub fn run(&self, spec: &RunSpec) -> RunReport {
         sweep_orphans(&spec.root);
         let mut timings = Timings::default();
-        let run_id = self.run_id_override.clone().unwrap_or_else(new_run_id);
+        let wall = now();
+        // The run id and the token are drawn before anything is
+        // created under the root, so a failure of the random
+        // source ends the run as a preparation failure with no
+        // directory standing, and no id or token is ever issued
+        // from a buffer the source never filled.
+        let drawn = match &self.run_id_override {
+            Some(id) => new_token().map(|token| (id.clone(), token)),
+            None => new_run_id().and_then(|id| new_token().map(|token| (id, token))),
+        };
+        let (run_id, token) = match drawn {
+            Ok(pair) => pair,
+            Err(err) => {
+                let mut report = RunReport::new(
+                    self.name(),
+                    "",
+                    "",
+                    spec.command.clone(),
+                    Outcome::HarnessError,
+                );
+                report.error = Some(format!("prepare failed, {}", py_os_error(&err)));
+                report.proc_mounted = Some(false);
+                report.sandbox_removed = Some(true);
+                timings.total = Some(ms_since(wall));
+                report.timings_ms = timings;
+                return report;
+            }
+        };
         let sandbox_dir = spec.root.join(format!("run-{}", run_id));
         let marker = spec.root.join(format!(".mayfly-clean-{}", run_id));
         let mut report = RunReport::new(
@@ -331,19 +414,20 @@ impl NamespaceBackend {
             &run_id,
             &sandbox_dir.to_string_lossy(),
             spec.command.clone(),
-            "harness_error",
+            Outcome::HarnessError,
         );
-        let wall = now();
         let guard = SignalGuard::install();
-        self.run_inner(
+        self.run_inner(&mut RunContext {
             spec,
-            &sandbox_dir,
-            &mut report,
-            &mut timings,
-            &marker,
-            &guard,
-            &run_id,
-        );
+            sandbox_dir: &sandbox_dir,
+            report: &mut report,
+            timings: &mut timings,
+            marker: &marker,
+            guard: &guard,
+            run_id: &run_id,
+            token: &token,
+            phase: now(),
+        });
         timings.total = Some(ms_since(wall));
         report.timings_ms = timings;
         if report.proc_mounted.is_none() {
@@ -355,19 +439,8 @@ impl NamespaceBackend {
         report
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn run_inner(
-        &self,
-        spec: &RunSpec,
-        sandbox_dir: &Path,
-        report: &mut RunReport,
-        timings: &mut Timings,
-        marker: &Path,
-        guard: &SignalGuard,
-        run_id: &str,
-    ) {
-        let phase = now();
-        if let Err(err) = self.create_run_dir(sandbox_dir) {
+    fn run_inner(&self, ctx: &mut RunContext<'_>) {
+        if let Err(err) = self.create_run_dir(ctx.sandbox_dir) {
             // The run directory is created as its own first
             // step, apart from everything prepared inside it,
             // so a failure here ends the run before it owns
@@ -377,20 +450,20 @@ impl NamespaceBackend {
             // remove, and no teardown runs against it. The run
             // reports the failure and leaves the standing tree
             // exactly as it found it.
-            report.error = Some(format!(
+            ctx.report.error = Some(format!(
                 "prepare failed, {}",
-                py_os_error_path(&err, sandbox_dir)
+                py_os_error_path(&err, ctx.sandbox_dir)
             ));
-            timings.prepare = Some(ms_since(phase));
+            ctx.timings.prepare = Some(ms_since(ctx.phase));
             return;
         }
-        if let Err(err) = std::fs::create_dir(sandbox_dir.join("rootfs")) {
-            report.error = Some(format!(
+        if let Err(err) = std::fs::create_dir(ctx.sandbox_dir.join("rootfs")) {
+            ctx.report.error = Some(format!(
                 "prepare failed, {}",
-                py_os_error_path(&err, &sandbox_dir.join("rootfs"))
+                py_os_error_path(&err, &ctx.sandbox_dir.join("rootfs"))
             ));
-            timings.prepare = Some(ms_since(phase));
-            self.teardown(sandbox_dir, report, timings, None);
+            ctx.timings.prepare = Some(ms_since(ctx.phase));
+            self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, None);
             return;
         }
         // The janitor is spawned here, as soon as the run
@@ -410,19 +483,19 @@ impl NamespaceBackend {
         // the janitor with the supervisor in a double kill
         // after it, and MF-12 names what such a death can
         // leave standing.
-        let token = new_token();
-        let janitor = self.start_janitor(sandbox_dir, marker, &token);
-        self.run_body(spec, sandbox_dir, report, timings, guard, run_id, phase);
-        if let Some(mut janitor) = janitor {
-            let clean = report.sandbox_removed == Some(true);
+        let janitor = self.start_janitor(ctx.sandbox_dir, ctx.marker, ctx.token);
+        self.run_body(ctx);
+        if let Some(janitor) = janitor {
+            let clean = ctx.report.sandbox_removed == Some(true);
             if clean {
-                write_clean_marker(marker, &token);
+                write_clean_marker(ctx.marker, ctx.token);
             }
             close_fd(janitor.write_fd);
+            let mut child = janitor.child;
             if clean {
                 let deadline = std::time::Instant::now() + Duration::from_secs(10);
                 loop {
-                    match janitor.child.try_wait() {
+                    match child.try_wait() {
                         Ok(Some(_)) => break,
                         Ok(None) => {
                             if std::time::Instant::now() >= deadline {
@@ -433,6 +506,17 @@ impl NamespaceBackend {
                         Err(_) => break,
                     }
                 }
+            } else {
+                // The sandbox still stands, so the janitor has
+                // its removal and recreation watch ahead of it,
+                // work that runs to its own retry and watch
+                // windows. The run does not block on it, and a
+                // detached waiter reaps the janitor when it
+                // exits, so a finished run never leaves the
+                // janitor behind as a zombie.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
             }
         }
     }
@@ -465,56 +549,39 @@ impl NamespaceBackend {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn run_body(
-        &self,
-        spec: &RunSpec,
-        sandbox_dir: &Path,
-        report: &mut RunReport,
-        timings: &mut Timings,
-        guard: &SignalGuard,
-        run_id: &str,
-        phase: f64,
-    ) {
+    fn run_body(&self, ctx: &mut RunContext<'_>) {
         let writer_result = match &self.provenance_writer {
-            Some(writer) => writer(sandbox_dir, run_id),
-            None => write_provenance(sandbox_dir, run_id),
+            Some(writer) => writer(ctx.sandbox_dir, ctx.run_id),
+            None => write_provenance(ctx.sandbox_dir, ctx.run_id),
         };
         if let Err(err) = writer_result {
-            report.error = Some(format!(
+            ctx.report.error = Some(format!(
                 "prepare failed, {}",
-                py_os_error_path(&err, &sandbox_dir.join(crate::PROVENANCE_NAME))
+                py_os_error_path(&err, &ctx.sandbox_dir.join(crate::PROVENANCE_NAME))
             ));
-            timings.prepare = Some(ms_since(phase));
-            self.teardown(sandbox_dir, report, timings, None);
+            ctx.timings.prepare = Some(ms_since(ctx.phase));
+            self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, None);
             return;
         }
-        timings.prepare = Some(ms_since(phase));
+        ctx.timings.prepare = Some(ms_since(ctx.phase));
         if self.unshare_path.is_none() {
-            report.error = Some("unshare is not available on this machine".to_string());
-            self.teardown(sandbox_dir, report, timings, None);
+            ctx.report.error = Some("unshare is not available on this machine".to_string());
+            self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, None);
             return;
         }
-        self.run_supervised(spec, sandbox_dir, report, timings, guard);
+        self.run_supervised(ctx);
     }
 
-    fn run_supervised(
-        &self,
-        spec: &RunSpec,
-        sandbox_dir: &Path,
-        report: &mut RunReport,
-        timings: &mut Timings,
-        guard: &SignalGuard,
-    ) {
+    fn run_supervised(&self, ctx: &mut RunContext<'_>) {
         let (status_r, status_w) = match pipe2_cloexec() {
             Ok(pair) => pair,
             Err(err) => {
-                report.error = Some(format!("could not launch unshare, {}", py_os_error(&err)));
-                self.teardown(sandbox_dir, report, timings, None);
+                ctx.report.error = Some(format!("could not launch unshare, {}", py_os_error(&err)));
+                self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, None);
                 return;
             }
         };
-        let (program, argv) = self.unshare_argv(spec, sandbox_dir, status_w);
+        let (program, argv) = self.unshare_argv(ctx.spec, ctx.sandbox_dir, status_w);
         // An argument carrying a NUL byte can never reach an
         // exec, and the Python harness refused it at spawn with
         // this wording, before anything was launched.
@@ -523,18 +590,34 @@ impl NamespaceBackend {
         if has_nul {
             close_fd(status_r);
             close_fd(status_w);
-            report.error = Some("could not launch unshare, embedded null byte".to_string());
-            self.teardown(sandbox_dir, report, timings, None);
+            ctx.report.error = Some("could not launch unshare, embedded null byte".to_string());
+            self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, None);
             return;
         }
-        let env = self.task_env(spec);
-        let pass_fds: Vec<RawFd> = spec.pass_fds.clone();
+        let mut env = self.task_env(ctx.spec);
+        // The internal token rides to the unshare process and
+        // through it to the init, so the hidden entry points can
+        // tell the run's own children from a direct caller. The
+        // init removes the key from its own environment before
+        // it supervises the task, so the token stands in no
+        // environment the task can read, and the scrub that
+        // built the rest of this environment never admits it.
+        env.push((
+            OsString::from(crate::INTERNAL_TOKEN_ENV),
+            OsString::from(ctx.token),
+        ));
+        let pass_fds: Vec<RawFd> = ctx.spec.pass_fds.clone();
         let mut cmd = Command::new(&program);
         cmd.args(&argv)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env_clear()
             .envs(env.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())));
+        // The closure runs in the forked child between fork and
+        // exec, where it only arms the parent death signal and
+        // clears the close on exec flag on descriptors this call
+        // created or the caller lent for the child, all async
+        // signal safe operations on owned descriptors.
         unsafe {
             cmd.pre_exec(move || {
                 libc::prctl(1, 9, 0, 0, 0);
@@ -551,11 +634,11 @@ impl NamespaceBackend {
             Err(err) => {
                 close_fd(status_r);
                 close_fd(status_w);
-                report.error = Some(format!(
+                ctx.report.error = Some(format!(
                     "could not launch unshare, {}",
                     spawn_error_text(&err, &program)
                 ));
-                self.teardown(sandbox_dir, report, timings, None);
+                self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, None);
                 return;
             }
         };
@@ -596,7 +679,7 @@ impl NamespaceBackend {
             match child.try_wait() {
                 Ok(Some(exit)) => status = Some(exit),
                 Ok(None) => {
-                    if guard.interrupted() {
+                    if ctx.guard.interrupted() {
                         let _ = child.kill();
                         break;
                     }
@@ -610,7 +693,7 @@ impl NamespaceBackend {
             None => match child.wait() {
                 Ok(exit) => exit,
                 Err(_) => {
-                    self.teardown(sandbox_dir, report, timings, None);
+                    self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, None);
                     return;
                 }
             },
@@ -625,8 +708,8 @@ impl NamespaceBackend {
             close_fd(status_r);
             let _ = status_done_rx.recv_timeout(Duration::from_secs(5));
         }
-        report.stdout_tail = out_tail.text();
-        report.stderr_tail = err_tail.text();
+        ctx.report.stdout_tail = out_tail.text();
+        ctx.report.stderr_tail = err_tail.text();
 
         let events_snapshot = events.lock().unwrap().clone();
         let mut by_name: HashMap<String, (f64, serde_json::Value)> = HashMap::new();
@@ -638,7 +721,7 @@ impl NamespaceBackend {
             }
         }
         if let Some((_, ready)) = by_name.get("ready") {
-            report.proc_mounted = Some(
+            ctx.report.proc_mounted = Some(
                 ready
                     .get("proc_mounted")
                     .and_then(|v| v.as_bool())
@@ -652,7 +735,7 @@ impl NamespaceBackend {
                 .and_then(|v| v.as_f64())
                 .unwrap_or(*receipt);
             started_ts = Some(ts);
-            timings.start = Some(round3((ts - spawn).max(0.0) * 1000.0));
+            ctx.timings.start = Some(round3((ts - spawn).max(0.0) * 1000.0));
         }
         let mut ended_ts: Option<f64> = None;
         if let Some((receipt, done)) = by_name.get("task_done") {
@@ -661,7 +744,7 @@ impl NamespaceBackend {
             }
             let done_ts = done.get("ts").and_then(|v| v.as_f64()).unwrap_or(*receipt);
             ended_ts = Some(done_ts);
-            timings.task = Some(round3((done_ts - started_ts.unwrap()).max(0.0) * 1000.0));
+            ctx.timings.task = Some(round3((done_ts - started_ts.unwrap()).max(0.0) * 1000.0));
             // An interrupt received before the task done stamp
             // makes the run a harness error even where the task
             // done event reaches the runner only after the sandbox
@@ -669,22 +752,22 @@ impl NamespaceBackend {
             // stamp leaves the task outcome standing. The stamps
             // are compared, not the order the runner drained the
             // events in, and MF-4 carries the rule.
-            let sig_ts = guard.first_time();
-            if guard.interrupted() && (sig_ts.is_none() || sig_ts.unwrap() <= done_ts) {
-                report.error = Some(format!(
+            let sig_ts = ctx.guard.first_time();
+            if ctx.guard.interrupted() && (sig_ts.is_none() || sig_ts.unwrap() <= done_ts) {
+                ctx.report.error = Some(format!(
                     "the run was interrupted by signal {} and the sandbox was torn down",
-                    guard.first().unwrap_or(0)
+                    ctx.guard.first().unwrap_or(0)
                 ));
             } else {
-                report.outcome = "task".to_string();
+                ctx.report.outcome = Outcome::Task;
                 if let Some(signal) = done.get("signal").and_then(|v| v.as_i64()) {
-                    report.task_signal = Some(signal as i32);
+                    ctx.report.task_signal = Some(signal as i32);
                 } else if let Some(code) = done.get("exit_code").and_then(|v| v.as_i64()) {
-                    report.task_exit_code = Some(code as i32);
+                    ctx.report.task_exit_code = Some(code as i32);
                 }
             }
         } else if let Some((receipt, error_event)) = by_name.get("start_error") {
-            report.error = Some(
+            ctx.report.error = Some(
                 error_event
                     .get("detail")
                     .and_then(|v| v.as_str())
@@ -697,10 +780,10 @@ impl NamespaceBackend {
                     .and_then(|v| v.as_f64())
                     .unwrap_or(*receipt),
             );
-        } else if guard.interrupted() {
-            report.error = Some(format!(
+        } else if ctx.guard.interrupted() {
+            ctx.report.error = Some(format!(
                 "the run was interrupted by signal {} and the sandbox was torn down",
-                guard.first().unwrap_or(0)
+                ctx.guard.first().unwrap_or(0)
             ));
         } else {
             let mut detail = if by_name.contains_key("started") {
@@ -712,7 +795,7 @@ impl NamespaceBackend {
             if returncode != 0 {
                 detail.push_str(&format!(", unshare exit {}", returncode));
             }
-            let trimmed = report.stderr_tail.trim();
+            let trimmed = ctx.report.stderr_tail.trim();
             if !trimmed.is_empty() {
                 let tail: String = {
                     let chars: Vec<char> = trimmed.chars().collect();
@@ -721,24 +804,24 @@ impl NamespaceBackend {
                 };
                 detail.push_str(&format!(", sandbox stderr tail, {}", tail));
             }
-            report.error = Some(detail);
+            ctx.report.error = Some(detail);
         }
 
-        self.teardown(sandbox_dir, report, timings, ended_ts);
-        if report.sandbox_removed != Some(true) {
-            if report.outcome == "task" {
-                report.outcome = "harness_error".to_string();
-                report.task_exit_code = None;
-                report.task_signal = None;
-                report.error =
+        self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, ended_ts);
+        if ctx.report.sandbox_removed != Some(true) {
+            if ctx.report.outcome == Outcome::Task {
+                ctx.report.outcome = Outcome::HarnessError;
+                ctx.report.task_exit_code = None;
+                ctx.report.task_signal = None;
+                ctx.report.error =
                     Some("the sandbox directory could not be removed after the run".to_string());
-            } else if let Some(error) = &report.error {
-                report.error = Some(format!(
+            } else if let Some(error) = &ctx.report.error {
+                ctx.report.error = Some(format!(
                     "{}, and the sandbox directory could not be removed",
                     error
                 ));
             } else {
-                report.error =
+                ctx.report.error =
                     Some("the sandbox directory could not be removed after the run".to_string());
             }
         }
@@ -758,6 +841,9 @@ fn spawn_error_text(err: &io::Error, program: &OsString) -> String {
 }
 
 fn drain_status(fd: RawFd, events: &Arc<Mutex<Vec<(f64, serde_json::Value)>>>) {
+    // The descriptor is the read end of this run's status pipe,
+    // created by the caller for this drain alone, and the File
+    // built from it takes the one ownership of it.
     let mut stream = unsafe { std::fs::File::from_raw_fd(fd) };
     let mut pending: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
