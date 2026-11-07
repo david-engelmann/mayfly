@@ -46,7 +46,7 @@ cd mayfly
 cargo install --path .
 ```
 
-The install puts the mayfly binary in the Cargo bin directory. Mayfly runs on Linux and is wired for x86_64 and aarch64 machines.
+The install puts the mayfly binary in the Cargo bin directory. On a default install that directory is ~/.cargo/bin, and it must stand on your PATH for the mayfly command to resolve. Mayfly runs on Linux and is wired for x86_64 and aarch64 machines.
 
 ## Quickstart
 
@@ -192,7 +192,7 @@ mayfly run --root /tmp/mayfly-runs --net -- /usr/bin/python3 -c "import socket; 
 
 ### Exit codes
 
-The command line exit code states which of three outcomes happened. A task exit code is mirrored exactly, as the quickstart failure shows. A failure before the task starts is a harness error and exits at 125, and its report claims no task exit code. A task killed by a signal exits at 128 plus the signal number, and its report names the signal and claims no exit code. The last line of each block is the shell exit code of that run, printed by echo $? in the same session.
+The command line exit code states which of three outcomes happened. A task exit code is mirrored exactly, as the quickstart failure shows. A failure before the task starts is a harness error and exits at 125, and its report claims no task exit code. A task killed by a signal exits at 128 plus the signal number, and its report names the signal and claims no exit code. The last line of each block is the shell exit code of that run, printed by echo $? in the same session. A malformed call stands outside the three outcomes. Missing the root, missing the command, or naming an option mayfly does not know exits at 2 with the usage line, and no report is printed.
 
 ```
 mayfly run --root /tmp/mayfly-runs -- /bin/does-not-exist
@@ -256,7 +256,7 @@ mayfly run --root /tmp/mayfly-runs -- /bin/sh -c "kill -TERM $$"
 
 The namespace backend works today. A run builds its sandbox, supervises the task, prints the report, and tears the sandbox down, and interrupting the command still tears the sandbox down.
 
-Mayfly is not a micro-VM and there is no hypervisor backend. Isolation rests on Linux namespaces and the prepared root, and slice 1 sets no resource limits and no timeout on the task and has no GPU support. A janitor watches for a supervisor that dies without removing its sandbox and removes the directory, and where the janitor dies too the next run under the same root sweeps the directory away before it prepares its own. A command killed before its provenance is written can leave an empty sandbox directory standing under the root, and the contract names that residue rather than hiding it. A fresh proc mount inside a user namespace is refused on some machines, and on those machines the prepared root carries an empty proc directory and the report says so. Every capture in this README was taken on such a machine, which is why every report above shows proc_mounted as false.
+Mayfly is not a micro-VM and there is no hypervisor backend. Isolation rests on Linux namespaces and the prepared root, and slice 1 sets no resource limits and no timeout on the task and has no GPU support. A janitor watches for a supervisor that dies without removing its sandbox and removes the directory, and where the janitor dies too the next run under the same root sweeps the directory away before it prepares its own. A removal that does not land leaves the directory standing for the janitor, and the report says so with sandbox_removed set to false. A command killed before its provenance is written can leave an empty sandbox directory standing under the root, and the contract names that residue rather than hiding it. A fresh proc mount inside a user namespace is refused on some machines, and on those machines the prepared root carries an empty proc directory and the report says so. Every capture in this README was taken on such a machine, which is why every report above shows proc_mounted as false.
 
 The contract lives in CONTRACT.md, where the setup obligations S1 to S5 stand beside the full contract that landed with slice 1, obligations MF-1 to MF-12, each stated so it can fail.
 
