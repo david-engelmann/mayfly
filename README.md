@@ -2,7 +2,7 @@
 
 Runs one command in a disposable directory with a scrubbed environment and the network off by default, mirrors the command's exit code, and deletes the directory when the command ends.
 
-Mayfly is a small Rust program that gives one task a disposable sandbox to run in. You hand it a root directory and a command. It builds a fresh sandbox under that root from Linux namespaces and a prepared root filesystem, runs the command inside under its own init, prints a run report as JSON, and tears the whole sandbox down when the command ends.
+Mayfly is a small Rust program that gives one task a disposable sandbox to run in. You hand it a root directory and a command. It builds a fresh namespace sandbox under that root from Linux namespaces and a prepared root filesystem, runs the command inside under its own init, prints a run report as JSON, and tears the whole sandbox down when the command ends.
 
 [![CI](https://github.com/david-engelmann/mayfly/actions/workflows/ci.yml/badge.svg)](https://github.com/david-engelmann/mayfly/actions/workflows/ci.yml)
 
@@ -256,7 +256,7 @@ mayfly run --root /tmp/mayfly-runs -- /bin/sh -c "kill -TERM $$"
 
 The namespace backend works today. A run builds its sandbox, supervises the task, prints the report, and tears the sandbox down, and interrupting the command still tears the sandbox down.
 
-Mayfly is not a micro-VM and there is no hypervisor backend. Isolation rests on Linux namespaces and the prepared root, and slice 1 sets no resource limits and no timeout on the task and has no GPU support. A command killed before its provenance is written can leave an empty sandbox directory standing under the root, and the contract names that residue rather than hiding it. A fresh proc mount inside a user namespace is refused on some machines, and on those machines the prepared root carries an empty proc directory and the report says so. Every capture in this README was taken on such a machine, which is why every report above shows proc_mounted as false.
+Mayfly is not a micro-VM and there is no hypervisor backend. Isolation rests on Linux namespaces and the prepared root, and slice 1 sets no resource limits and no timeout on the task and has no GPU support. A janitor watches for a supervisor that dies without removing its sandbox and removes the directory, and where the janitor dies too the next run under the same root sweeps the directory away before it prepares its own. A command killed before its provenance is written can leave an empty sandbox directory standing under the root, and the contract names that residue rather than hiding it. A fresh proc mount inside a user namespace is refused on some machines, and on those machines the prepared root carries an empty proc directory and the report says so. Every capture in this README was taken on such a machine, which is why every report above shows proc_mounted as false.
 
 The contract lives in CONTRACT.md, where the setup obligations S1 to S5 stand beside the full contract that landed with slice 1, obligations MF-1 to MF-12, each stated so it can fail.
 
