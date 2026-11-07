@@ -2,7 +2,7 @@
 name = "mayfly"
 version = "0.1.0"
 edition = "2021"
-description = "A disposable sandbox harness for agent tasks, with a Linux namespace backend"
+description = "Runs one command in a disposable directory with a scrubbed environment and the network off by default, mirrors the command's exit code, and deletes the directory when the command ends."
 license = "MIT"
 
 [lib]
