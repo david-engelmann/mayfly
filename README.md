@@ -223,11 +223,11 @@ mayfly run --root /tmp/mayfly-runs -- /bin/does-not-exist
 ```
 
 ```
-mayfly run --root /tmp/mayfly-runs -- /bin/sh -c "kill -TERM $$"
+mayfly run --root /tmp/mayfly-runs -- /bin/sh -c 'kill -TERM $$'
 {
   "backend": "namespace",
-  "run_id": "bb926005aeaa",
-  "sandbox_dir": "/tmp/mayfly-runs/run-bb926005aeaa",
+  "run_id": "8151c89feaec",
+  "sandbox_dir": "/tmp/mayfly-runs/run-8151c89feaec",
   "command": [
     "/bin/sh",
     "-c",
@@ -240,11 +240,11 @@ mayfly run --root /tmp/mayfly-runs -- /bin/sh -c "kill -TERM $$"
   "proc_mounted": false,
   "sandbox_removed": true,
   "timings_ms": {
-    "prepare": 3.348,
-    "start": 60.545,
-    "task": 0.049,
-    "teardown": 17.734,
-    "total": 84.676
+    "prepare": 1.503,
+    "start": 11.662,
+    "task": 0.609,
+    "teardown": 9.489,
+    "total": 33.798
   },
   "stdout_tail": "",
   "stderr_tail": ""
