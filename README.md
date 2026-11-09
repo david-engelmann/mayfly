@@ -310,7 +310,7 @@ The task writes a small C source into its work directory and compiles it with th
 
 ```
 mayfly run --root /tmp/mayfly-runs -- /usr/bin/python3 -c "import subprocess, sys
-src = '#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\nstruct point {\n    double x;\n    double y;\n};\n\nstatic double distance(const struct point *a, const struct point *b)\n{\n    double dx = a->x - b->x;\n    double dy = a->y - b->y;\n    return dx * dx + dy * dy;\n}\n\nint main(void)\n{\n    struct point points[8];\n    double total = 0.0;\n    int i;\n    for (i = 0; i < 8; i++) {\n        points[i].x = (double)i * 1.5;\n        points[i].y = (double)i * 0.25;\n    }\n    for (i = 1; i < 8; i++) {\n        total += distance(&points[i - 1], &points[i]);\n    }\n    printf(\"total %.2f over %d points\\n\", total, 8);\n    return total < 0.0 ? 1 : 0;\n}\n'
+src = '#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\nstruct point {\n    double x;\n    double y;\n};\n\nstatic double distance(const struct point *a, const struct point *b)\n{\n    double dx = a->x - b->x;\n    double dy = a->y - b->y;\n    return dx * dx + dy * dy;\n}\n\nint main(void)\n{\n    struct point points[8];\n    double total = 0.0;\n    int i;\n    for (i = 0; i < 8; i++) {\n        points[i].x = (double)i * 1.5;\n        points[i].y = (double)i * 0.25;\n    }\n    for (i = 1; i < 8; i++) {\n        total += distance(&points[i - 1], &points[i]);\n    }\n    printf(\"total %.2f over %d points\\\\n\", total, 8);\n    return total < 0.0 ? 1 : 0;\n}\n'
 open('shape.c', 'w').write(src)
 done = subprocess.run(['/usr/bin/cc', '-O2', '-o', 'shape', 'shape.c'])
 sys.exit(done.returncode)"
