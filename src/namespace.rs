@@ -377,9 +377,31 @@ impl NamespaceBackend {
     }
 
     pub fn run(&self, spec: &RunSpec) -> RunReport {
+        let wall = now();
+        // The floors of MF-13 are enforced here, in one place
+        // for both surfaces, ahead of the orphan sweep and
+        // ahead of anything created under the root, so a bound
+        // under its floor prepares nothing at all. The command
+        // line refuses the same values at parse time in its own
+        // class and never reaches this answer.
+        if let Some(error) = floor_breach(spec) {
+            let mut report = RunReport::new(
+                self.name(),
+                "",
+                "",
+                spec.command.clone(),
+                Outcome::HarnessError,
+            );
+            report.error = Some(error);
+            report.proc_mounted = Some(false);
+            report.sandbox_removed = Some(true);
+            let mut timings = Timings::default();
+            timings.total = Some(ms_since(wall));
+            report.timings_ms = timings;
+            return report;
+        }
         sweep_orphans(&spec.root);
         let mut timings = Timings::default();
-        let wall = now();
         // The run id and the token are drawn before anything is
         // created under the root, so a failure of the random
         // source ends the run as a preparation failure with no
@@ -826,6 +848,43 @@ impl NamespaceBackend {
             }
         }
     }
+}
+
+/// The refusal a run answers with where one of its bounds
+/// stands under the floor MF-13 sets for it, naming the bound
+/// and its floor, in the shape the timeout breach sets for
+/// each bound. The wording carries no prepare prefix, because
+/// nothing was prepared. None where every bound stands unset
+/// or at or over its floor.
+fn floor_breach(spec: &RunSpec) -> Option<String> {
+    if let Some(seconds) = spec.timeout_seconds {
+        if seconds < crate::TIMEOUT_FLOOR_SECONDS {
+            return Some(format!(
+                "the timeout of {} seconds stands under the floor of {} second",
+                seconds,
+                crate::TIMEOUT_FLOOR_SECONDS
+            ));
+        }
+    }
+    if let Some(seconds) = spec.max_cpu_seconds {
+        if seconds < crate::MAX_CPU_FLOOR_SECONDS {
+            return Some(format!(
+                "the processor ceiling of {} seconds stands under the floor of {} second",
+                seconds,
+                crate::MAX_CPU_FLOOR_SECONDS
+            ));
+        }
+    }
+    if let Some(bytes) = spec.max_memory_bytes {
+        if bytes < crate::MAX_MEMORY_FLOOR_BYTES {
+            return Some(format!(
+                "the address space ceiling of {} bytes stands under the floor of {} bytes",
+                bytes,
+                crate::MAX_MEMORY_FLOOR_BYTES
+            ));
+        }
+    }
+    None
 }
 
 fn spawn_error_text(err: &io::Error, program: &OsString) -> String {

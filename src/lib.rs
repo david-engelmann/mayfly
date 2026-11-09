@@ -28,6 +28,15 @@ pub const TAIL_CHARS: usize = 4000;
 pub const TAIL_BYTES: usize = 1 << 16;
 pub const PHASES: [&str; 4] = ["prepare", "start", "task", "teardown"];
 
+/// The lowest value each bound of MF-13 accepts. A value under
+/// its floor is refused as a caller error before any sandbox is
+/// prepared, on the command line at parse time and at the head
+/// of the backend run method on the library surface, so both
+/// surfaces refuse the same values.
+pub const TIMEOUT_FLOOR_SECONDS: u64 = 1;
+pub const MAX_CPU_FLOOR_SECONDS: u64 = 1;
+pub const MAX_MEMORY_FLOOR_BYTES: u64 = 16777216;
+
 /// The one monotonic clock every stamp in a run is taken from, in
 /// seconds. The runner, the init event stamps, and the interrupt
 /// receipt stamps all read this clock, so stamps taken in
@@ -118,6 +127,18 @@ pub struct RunSpec {
     /// environment is read at run time instead, which is what the
     /// command line and the ordinary library calls do.
     pub caller_env: Vec<(OsString, OsString)>,
+    /// The wall clock timeout of the task phase in whole
+    /// seconds, where the caller sets one, under MF-13. None
+    /// runs under no timeout.
+    pub timeout_seconds: Option<u64>,
+    /// The processor time ceiling of the task in whole
+    /// seconds, where the caller sets one, under MF-13. None
+    /// runs under no processor ceiling.
+    pub max_cpu_seconds: Option<u64>,
+    /// The address space ceiling of the task in bytes, where
+    /// the caller sets one, under MF-13. None runs under no
+    /// address space ceiling.
+    pub max_memory_bytes: Option<u64>,
 }
 
 impl RunSpec {
@@ -129,6 +150,9 @@ impl RunSpec {
             network: false,
             pass_fds: Vec::new(),
             caller_env: Vec::new(),
+            timeout_seconds: None,
+            max_cpu_seconds: None,
+            max_memory_bytes: None,
         }
     }
 }
