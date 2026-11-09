@@ -2292,7 +2292,6 @@ fn an_interrupt_before_the_task_done_stamp_is_a_harness_error() {
     assert!(glob_clean_markers(&root_dir).is_empty());
 }
 
-
 #[test]
 fn an_interrupt_after_the_task_done_stamp_keeps_the_task_outcome() {
     let tmp = Tmp::new("fake-done-early");
@@ -3152,7 +3151,10 @@ fn an_unbounded_runs_report_stands_as_landed() {
         vec!["prepare", "start", "task", "teardown", "total"]
     );
     assert_eq!(payload["backend"], "namespace");
-    assert_eq!(payload["command"], serde_json::json!(["/bin/echo", "landed"]));
+    assert_eq!(
+        payload["command"],
+        serde_json::json!(["/bin/echo", "landed"])
+    );
     assert_eq!(payload["outcome"], "task");
     assert_eq!(payload["task_exit_code"], 0);
     assert_eq!(payload["task_signal"], serde_json::Value::Null);

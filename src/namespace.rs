@@ -854,9 +854,7 @@ impl NamespaceBackend {
             };
             if timed_out {
                 ctx.report.error = Some(timeout_words(ctx.spec.timeout_seconds.unwrap_or(0)));
-            } else if ctx.guard.interrupted()
-                && (sig_ts.is_none() || sig_ts.unwrap() <= done_ts)
-            {
+            } else if ctx.guard.interrupted() && (sig_ts.is_none() || sig_ts.unwrap() <= done_ts) {
                 ctx.report.error = Some(format!(
                     "the run was interrupted by signal {} and the sandbox was torn down",
                     ctx.guard.first().unwrap_or(0)
