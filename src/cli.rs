@@ -13,8 +13,7 @@ use std::path::PathBuf;
 
 use crate::{
     dump_pretty, get_backend, JsonValue, Outcome, RunSpec, HARNESS_EXIT_CODE,
-    MAX_CPU_CEILING_SECONDS, MAX_CPU_FLOOR_SECONDS, MAX_MEMORY_FLOOR_BYTES,
-    TIMEOUT_FLOOR_SECONDS,
+    MAX_CPU_CEILING_SECONDS, MAX_CPU_FLOOR_SECONDS, MAX_MEMORY_FLOOR_BYTES, TIMEOUT_FLOOR_SECONDS,
 };
 
 const USAGE: &str = "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--net] [--timeout SECONDS] [--max-cpu SECONDS] [--max-memory BYTES] -- COMMAND...";
@@ -57,7 +56,11 @@ fn bound_value(
     }
     if let Some(ceiling) = ceiling {
         if parsed > ceiling {
-            let _ = writeln!(err, "mayfly run needs {} of at most {} seconds", name, ceiling);
+            let _ = writeln!(
+                err,
+                "mayfly run needs {} of at most {} seconds",
+                name, ceiling
+            );
             return Err(2);
         }
     }
