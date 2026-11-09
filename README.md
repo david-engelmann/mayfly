@@ -252,11 +252,144 @@ mayfly run --root /tmp/mayfly-runs -- /bin/sh -c 'kill -TERM $$'
 143
 ```
 
+### The bounds a caller can set
+
+A run may carry three bounds, each set by its caller and none set by default, so a run that names no bound runs under no bound. The timeout option bounds the wall clock span of the task phase in whole seconds. The max-cpu option bounds the processor time of the task in whole seconds, as a soft limit the task dies by the processor limit signal at, with a hard limit one second past it that kills a task ignoring that signal. The max-memory option bounds the address space of the task in bytes, and a task that reaches it finds its allocations refused and answers for the refusal in its own way, and no report claims the ceiling fired. A value under a floor is refused before anything is prepared, at one second for each of the two time bounds and at 16777216 bytes for the memory bound. A timeout that fires ends the run as a harness error at 125 with the teardown still run, as the capture below shows.
+
+```
+mayfly run --root /tmp/mayfly-runs --timeout 2 -- /usr/bin/python3 -c "import time; time.sleep(30)"
+{
+  "backend": "namespace",
+  "run_id": "d00e22a6a8d1",
+  "sandbox_dir": "/tmp/mayfly-runs/run-d00e22a6a8d1",
+  "command": [
+    "/usr/bin/python3",
+    "-c",
+    "import time; time.sleep(30)"
+  ],
+  "outcome": "harness_error",
+  "task_exit_code": null,
+  "task_signal": null,
+  "error": "the task did not finish within the timeout of 2 seconds and the sandbox was torn down",
+  "proc_mounted": false,
+  "sandbox_removed": true,
+  "timings_ms": {
+    "prepare": 0.816,
+    "start": 6.816,
+    "task": null,
+    "teardown": 0.244,
+    "total": 2064.419
+  },
+  "stdout_tail": "",
+  "stderr_tail": ""
+}
+125
+```
+
+The last line is the shell exit code of that run, printed by echo $? in the same session.
+
+## Measurements
+
+Every figure in this section was measured on one machine, an AMD EPYC 9D25 showing 4 logical processors and 8124908 kB of memory under kernel 7.0.0-43-generic, while the machine was shared with the rest of the program fleet and other work was running on it. The figures are records of those runs on that machine under that load. They are not promises about any other machine or about this machine under another load, and no figure from this section stands in the repo description or in any claim about the tool.
+
+The runs were taken on 2026-11-09. Each shape below ran 25 times unless its entry says otherwise, and the figures are the median and the maximum of the run totals and of the phases the shape names, taken from the run reports themselves. A median and a maximum are printed and no mean is, because a mean hides the tail a reader handing work to this tool most needs to see. The exact command of every shape is printed with its figures.
+
+### Process startup
+
+The task is /bin/echo carrying one word.
+
+```
+mayfly run --root /tmp/mayfly-runs -- /bin/echo hello
+```
+
+The total stands at a median of 96.085 ms and a maximum of 193.599 ms. The prepare phase stands at a median of 2.536 ms and a maximum of 60.428 ms, the start phase at a median of 24.759 ms and a maximum of 111.557 ms, and the teardown phase at a median of 12.527 ms and a maximum of 85.274 ms. Beside the sandbox runs stand 25 runs of the same command bare on the host, timed by the same monotonic clock, at a median of 2.407 ms and a maximum of 56.38 ms, so the startup overhead of the sandbox stands as the measured difference between the two totals rather than as an adjective.
+
+### Compile shaped
+
+The task writes a small C source into its work directory and compiles it with the system compiler standing in /usr/bin. The source is a few dozen lines written for this record and carried in the shape's command, and nothing of it is a fixture of this repo.
+
+```
+mayfly run --root /tmp/mayfly-runs -- /usr/bin/python3 -c "import subprocess, sys
+src = '#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\nstruct point {\n    double x;\n    double y;\n};\n\nstatic double distance(const struct point *a, const struct point *b)\n{\n    double dx = a->x - b->x;\n    double dy = a->y - b->y;\n    return dx * dx + dy * dy;\n}\n\nint main(void)\n{\n    struct point points[8];\n    double total = 0.0;\n    int i;\n    for (i = 0; i < 8; i++) {\n        points[i].x = (double)i * 1.5;\n        points[i].y = (double)i * 0.25;\n    }\n    for (i = 1; i < 8; i++) {\n        total += distance(&points[i - 1], &points[i]);\n    }\n    printf(\"total %.2f over %d points\\\\n\", total, 8);\n    return total < 0.0 ? 1 : 0;\n}\n'
+open('shape.c', 'w').write(src)
+done = subprocess.run(['/usr/bin/cc', '-O2', '-o', 'shape', 'shape.c'])
+sys.exit(done.returncode)"
+```
+
+The total stands at a median of 438.56 ms and a maximum of 997.719 ms, and the task phase at a median of 383.241 ms and a maximum of 891.954 ms.
+
+### IO shaped
+
+The task writes 64 megabytes into a file in its work directory, reads the file back, and prints a checksum of what it read.
+
+```
+mayfly run --root /tmp/mayfly-runs -- /usr/bin/python3 -c "import sys, zlib
+chunk = bytes(range(256)) * 4096
+with open('data.bin', 'wb') as f:
+    for _ in range(64):
+        f.write(chunk)
+total = 0
+with open('data.bin', 'rb') as f:
+    while True:
+        part = f.read(1 << 20)
+        if not part:
+            break
+        total = zlib.crc32(part, total)
+print('checksum', total)
+"
+```
+
+The total stands at a median of 297.502 ms and a maximum of 500.734 ms, and the task phase at a median of 208.677 ms and a maximum of 339.421 ms.
+
+### Search shaped
+
+The task builds a tree of one thousand small files in its work directory, one file in ten carrying the term mayfly-needle, and then greps that tree for the term. The tree is built inside the same task because a sandbox holds nothing between runs for a later run to search, so the task phase below covers the building and the search together.
+
+```
+mayfly run --root /tmp/mayfly-runs -- /usr/bin/python3 -c "import os, subprocess, sys
+os.makedirs('tree', exist_ok=True)
+for i in range(1000):
+    text = 'filler line for file %d\n' % i
+    if i % 10 == 0:
+        text += 'mayfly-needle\n'
+    open('tree/file-%04d.txt' % i, 'w').write(text)
+done = subprocess.run(['grep', '-r', '-l', 'mayfly-needle', 'tree'], capture_output=True, text=True)
+print('files carrying the term', len(done.stdout.splitlines()))
+sys.exit(done.returncode)"
+```
+
+The total stands at a median of 194.23 ms and a maximum of 357.673 ms, and the task phase at a median of 136.143 ms and a maximum of 269.235 ms.
+
+### The bounds demonstrated
+
+Three shapes ran once each, because each demonstrates a bound rather than a distribution. A sleeping task under a timeout of 2 seconds ended as a harness error with the error line naming the timeout, no task phase timing, and a total of 2025.39 ms, at a command line exit of 125.
+
+```
+mayfly run --root /tmp/mayfly-runs --timeout 2 -- /usr/bin/python3 -c "import time; time.sleep(30)"
+```
+
+An allocating task under an address space ceiling of 268435456 bytes, trying to allocate three times that space, met the refusal and answered at the exit code 42 it chose for it, as a task outcome.
+
+```
+mayfly run --root /tmp/mayfly-runs --max-memory 268435456 -- /usr/bin/python3 -c "import sys
+try:
+    blob = bytearray(3 * 268435456)
+    sys.exit(0)
+except MemoryError:
+    sys.exit(42)"
+```
+
+A busy task under a processor ceiling of 1 second died by the processor limit signal, signal 24, as a task outcome, at a command line exit of 152.
+
+```
+mayfly run --root /tmp/mayfly-runs --max-cpu 1 -- /usr/bin/python3 -c "exec('while True:' + chr(10) + '    pass')"
+```
+
 ## Status
 
 The namespace backend works today. A run builds its sandbox, supervises the task, prints the report, and tears the sandbox down, and interrupting the command still tears the sandbox down.
 
-Mayfly is not a micro-VM and there is no hypervisor backend. Isolation rests on Linux namespaces and the prepared root, and slice 1 sets no resource limits and no timeout on the task and has no GPU support. A janitor watches for a supervisor that dies without removing its sandbox and removes the directory, and where the janitor dies too the next run under the same root sweeps the directory away before it prepares its own. A removal that does not land leaves the directory standing for the janitor, and the report says so with sandbox_removed set to false. A command killed before its provenance is written can leave an empty sandbox directory standing under the root, and the contract names that residue rather than hiding it. A fresh proc mount inside a user namespace is refused on some machines, and on those machines the prepared root carries an empty proc directory and the report says so. Every capture in this README was taken on such a machine, which is why every report above shows proc_mounted as false.
+Mayfly is not a micro-VM and there is no hypervisor backend. Isolation rests on Linux namespaces and the prepared root, and a run may carry a wall clock timeout and processor and address space ceilings its caller sets, and slice 1 has no GPU support. A janitor watches for a supervisor that dies without removing its sandbox and removes the directory, and where the janitor dies too the next run under the same root sweeps the directory away before it prepares its own. A removal that does not land leaves the directory standing for the janitor, and the report says so with sandbox_removed set to false. A command killed before its provenance is written can leave an empty sandbox directory standing under the root, and the contract names that residue rather than hiding it. A fresh proc mount inside a user namespace is refused on some machines, and on those machines the prepared root carries an empty proc directory and the report says so. Every capture in this README was taken on such a machine, which is why every report above shows proc_mounted as false.
 
 The contract lives in CONTRACT.md, where the setup obligations S1 to S5 stand beside the full contract that landed with slice 1, obligations MF-1 to MF-12, each stated so it can fail.
 

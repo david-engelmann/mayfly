@@ -299,6 +299,22 @@ impl NamespaceBackend {
         argv.push(sandbox_dir.join("rootfs").into_os_string());
         argv.push(OsString::from("--status-fd"));
         argv.push(OsString::from(status_fd.to_string()));
+        // The two ceilings of MF-13 ride the argument vector
+        // the harness alone builds, after the status descriptor
+        // option and before the separator, and only when set.
+        // They never travel through the environment, because the
+        // environment is the caller's scrubbed surface and a
+        // bound carried there would stand where the task itself
+        // could read it. The timeout never travels, because the
+        // supervisor that enforces it sits on the host.
+        if let Some(seconds) = spec.max_cpu_seconds {
+            argv.push(OsString::from("--max-cpu"));
+            argv.push(OsString::from(seconds.to_string()));
+        }
+        if let Some(bytes) = spec.max_memory_bytes {
+            argv.push(OsString::from("--max-memory"));
+            argv.push(OsString::from(bytes.to_string()));
+        }
         argv.push(OsString::from("--"));
         for arg in &spec.command {
             argv.push(arg.clone());
@@ -377,9 +393,32 @@ impl NamespaceBackend {
     }
 
     pub fn run(&self, spec: &RunSpec) -> RunReport {
+        let wall = now();
+        // The floors of MF-13 are enforced here, in one place
+        // for both surfaces, ahead of the orphan sweep and
+        // ahead of anything created under the root, so a bound
+        // under its floor prepares nothing at all. The command
+        // line refuses the same values at parse time in its own
+        // class and never reaches this answer.
+        if let Some(error) = floor_breach(spec) {
+            let mut report = RunReport::new(
+                self.name(),
+                "",
+                "",
+                spec.command.clone(),
+                Outcome::HarnessError,
+            );
+            report.error = Some(error);
+            report.proc_mounted = Some(false);
+            report.sandbox_removed = Some(true);
+            report.timings_ms = Timings {
+                total: Some(ms_since(wall)),
+                ..Timings::default()
+            };
+            return report;
+        }
         sweep_orphans(&spec.root);
         let mut timings = Timings::default();
-        let wall = now();
         // The run id and the token are drawn before anything is
         // created under the root, so a failure of the random
         // source ends the run as a preparation failure with no
@@ -675,6 +714,17 @@ impl NamespaceBackend {
             let _ = err_done_tx.send(());
         }
         let mut status = None;
+        // The deadline the timeout of MF-13 sets, read from the
+        // started stamp the status drain is filling, on the one
+        // monotonic clock every stamp in the run shares. Until
+        // the started event stands no deadline runs, so the
+        // timeout bounds the task phase alone. Where the
+        // deadline passes with the task still running, the
+        // unshare child is killed through the same kill the
+        // interrupt path makes on the same handle, and the
+        // outcome is read from the stamps below rather than
+        // from the kill itself.
+        let mut deadline: Option<f64> = None;
         while status.is_none() {
             match child.try_wait() {
                 Ok(Some(exit)) => status = Some(exit),
@@ -682,6 +732,17 @@ impl NamespaceBackend {
                     if ctx.guard.interrupted() {
                         let _ = child.kill();
                         break;
+                    }
+                    if let Some(timeout) = ctx.spec.timeout_seconds {
+                        if deadline.is_none() {
+                            deadline = started_stamp(&events).map(|ts| ts + timeout as f64);
+                        }
+                        if let Some(deadline_ts) = deadline {
+                            if now() > deadline_ts {
+                                let _ = child.kill();
+                                break;
+                            }
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -698,6 +759,11 @@ impl NamespaceBackend {
                 }
             },
         };
+        // The moment the supervised wait ended, taken before
+        // the drain waits below, so the deadline comparison in
+        // the outcome reading is made against the end of the
+        // run and not against whenever the drains finished.
+        let wait_ended = now();
         let returncode = match status.code() {
             Some(code) => code,
             None => -status.signal().unwrap_or(0),
@@ -737,6 +803,25 @@ impl NamespaceBackend {
             started_ts = Some(ts);
             ctx.timings.start = Some(round3((ts - spawn).max(0.0) * 1000.0));
         }
+        // The deadline the timeout sets, the started stamp plus
+        // the seconds the caller set. A run whose started stamp
+        // never stood has no deadline, because the timeout
+        // bounds the task phase alone.
+        let deadline_ts = match (started_ts, ctx.spec.timeout_seconds) {
+            (Some(started), Some(timeout)) => Some(started + timeout as f64),
+            _ => None,
+        };
+        let sig_ts = ctx.guard.first_time();
+        // An interrupt governs the outcome where it was received
+        // at or before the deadline, and the timeout governs
+        // where the deadline passed first, because where an
+        // interrupt and the deadline both stand over one run
+        // the earlier stamp governs.
+        let interrupt_before_deadline = ctx.guard.interrupted()
+            && match deadline_ts {
+                Some(deadline) => sig_ts.is_none() || sig_ts.unwrap() <= deadline,
+                None => true,
+            };
         let mut ended_ts: Option<f64> = None;
         if let Some((receipt, done)) = by_name.get("task_done") {
             if started_ts.is_none() {
@@ -751,9 +836,26 @@ impl NamespaceBackend {
             // has been killed, and an interrupt received after the
             // stamp leaves the task outcome standing. The stamps
             // are compared, not the order the runner drained the
-            // events in, and MF-4 carries the rule.
-            let sig_ts = ctx.guard.first_time();
-            if ctx.guard.interrupted() && (sig_ts.is_none() || sig_ts.unwrap() <= done_ts) {
+            // events in, and MF-4 carries the rule. The deadline
+            // stands beside the interrupt on the same terms,
+            // under MF-13. Where the task done stamp stands at
+            // or before the deadline the task outcome stands,
+            // and where no task done stamp stands at or before
+            // the deadline the run is a harness error in the
+            // timeout words, unless an interrupt received before
+            // the deadline stands, whose words govern as the
+            // earlier stamp.
+            let timed_out = match deadline_ts {
+                Some(deadline) => {
+                    done_ts > deadline
+                        && !(ctx.guard.interrupted()
+                            && (sig_ts.is_none() || sig_ts.unwrap() <= deadline))
+                }
+                None => false,
+            };
+            if timed_out {
+                ctx.report.error = Some(timeout_words(ctx.spec.timeout_seconds.unwrap_or(0)));
+            } else if ctx.guard.interrupted() && (sig_ts.is_none() || sig_ts.unwrap() <= done_ts) {
                 ctx.report.error = Some(format!(
                     "the run was interrupted by signal {} and the sandbox was torn down",
                     ctx.guard.first().unwrap_or(0)
@@ -780,6 +882,17 @@ impl NamespaceBackend {
                     .and_then(|v| v.as_f64())
                     .unwrap_or(*receipt),
             );
+        } else if interrupt_before_deadline {
+            ctx.report.error = Some(format!(
+                "the run was interrupted by signal {} and the sandbox was torn down",
+                ctx.guard.first().unwrap_or(0)
+            ));
+        } else if deadline_ts.is_some() && wait_ended >= deadline_ts.unwrap() {
+            // The deadline passed with no task done stamp at or
+            // before it and no interrupt received before the
+            // deadline standing, so the run is a harness error
+            // in the timeout words.
+            ctx.report.error = Some(timeout_words(ctx.spec.timeout_seconds.unwrap_or(0)));
         } else if ctx.guard.interrupted() {
             ctx.report.error = Some(format!(
                 "the run was interrupted by signal {} and the sandbox was torn down",
@@ -826,6 +939,68 @@ impl NamespaceBackend {
             }
         }
     }
+}
+
+/// The refusal a run answers with where one of its bounds
+/// stands under the floor MF-13 sets for it, naming the bound
+/// and its floor, in the shape the timeout breach sets for
+/// each bound. The wording carries no prepare prefix, because
+/// nothing was prepared. None where every bound stands unset
+/// or at or over its floor.
+fn floor_breach(spec: &RunSpec) -> Option<String> {
+    if let Some(seconds) = spec.timeout_seconds {
+        if seconds < crate::TIMEOUT_FLOOR_SECONDS {
+            return Some(format!(
+                "the timeout of {} seconds stands under the floor of {} second",
+                seconds,
+                crate::TIMEOUT_FLOOR_SECONDS
+            ));
+        }
+    }
+    if let Some(seconds) = spec.max_cpu_seconds {
+        if seconds < crate::MAX_CPU_FLOOR_SECONDS {
+            return Some(format!(
+                "the processor ceiling of {} seconds stands under the floor of {} second",
+                seconds,
+                crate::MAX_CPU_FLOOR_SECONDS
+            ));
+        }
+    }
+    if let Some(bytes) = spec.max_memory_bytes {
+        if bytes < crate::MAX_MEMORY_FLOOR_BYTES {
+            return Some(format!(
+                "the address space ceiling of {} bytes stands under the floor of {} bytes",
+                bytes,
+                crate::MAX_MEMORY_FLOOR_BYTES
+            ));
+        }
+    }
+    None
+}
+
+/// The started stamp the status drain has recorded so far,
+/// read the way the outcome code reads it, the stamp the init
+/// put on its started event or the moment the runner received
+/// that event where the event carries no stamp. None where no
+/// started event stands yet.
+fn started_stamp(events: &Arc<Mutex<Vec<(f64, serde_json::Value)>>>) -> Option<f64> {
+    let snapshot = events.lock().unwrap();
+    for (receipt, event) in snapshot.iter() {
+        if event.get("event").and_then(|v| v.as_str()) == Some("started") {
+            return Some(event.get("ts").and_then(|v| v.as_f64()).unwrap_or(*receipt));
+        }
+    }
+    None
+}
+
+/// The words a run the timeout ended answers with, naming the
+/// seconds the caller set. They fire only where the task in
+/// fact did not finish by the deadline the timeout set.
+fn timeout_words(seconds: u64) -> String {
+    format!(
+        "the task did not finish within the timeout of {} seconds and the sandbox was torn down",
+        seconds
+    )
 }
 
 fn spawn_error_text(err: &io::Error, program: &OsString) -> String {

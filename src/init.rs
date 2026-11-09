@@ -448,7 +448,58 @@ fn watch_supervisor(status_fd: i32, child_slot: Arc<AtomicI32>) {
     }
 }
 
-fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
+/// Set the ceilings of MF-13 on the calling process, the
+/// forked task child between the fork and the exec, beside
+/// the capability drop the child already makes. The processor
+/// ceiling stands as a soft limit at the seconds the caller
+/// set and a hard limit one second past it, so a task that
+/// spends to the soft limit dies by the processor limit
+/// signal and a task that catches or ignores that signal dies
+/// by the kill signal at the hard limit. The address space
+/// ceiling stands as one limit at the bytes the caller set.
+/// A ceiling the run does not carry makes no call for it, so
+/// an unbounded run's child setup is the landed setup
+/// unchanged. The error carries the errno and its message, in
+/// the shape the exec error pipe reports, so a limit the
+/// machine refuses lands as a start failure in the standing
+/// shape and never as a task outcome.
+fn set_task_limits(
+    max_cpu_seconds: Option<u64>,
+    max_memory_bytes: Option<u64>,
+) -> Result<(), (i32, String)> {
+    // Each limit is a plain pair of counts built for the call,
+    // and the call writes nothing through a pointer.
+    unsafe {
+        if let Some(seconds) = max_cpu_seconds {
+            let limit = libc::rlimit {
+                rlim_cur: seconds,
+                rlim_max: seconds + 1,
+            };
+            if libc::setrlimit(libc::RLIMIT_CPU, &limit) != 0 {
+                let errno = errno_now();
+                return Err((errno, strerror(errno)));
+            }
+        }
+        if let Some(bytes) = max_memory_bytes {
+            let limit = libc::rlimit {
+                rlim_cur: bytes,
+                rlim_max: bytes,
+            };
+            if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                let errno = errno_now();
+                return Err((errno, strerror(errno)));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn supervise(
+    status_fd: i32,
+    command: &[OsString],
+    max_cpu_seconds: Option<u64>,
+    max_memory_bytes: Option<u64>,
+) -> i32 {
     let mut pipe_fds: [i32; 2] = [0, 0];
     // The array is owned by this call and holds exactly the two
     // descriptors pipe2 promises to write.
@@ -458,6 +509,9 @@ fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
     let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
     // Prepare the exec arguments before the fork, so the child
     // only touches async signal safe calls on its way to exec.
+    // The limit calls the child makes are in that same class,
+    // plain system calls that pass counts and write nothing
+    // through a pointer.
     let argv: Vec<CString> = command
         .iter()
         .map(|arg| {
@@ -471,8 +525,9 @@ fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
     // everything the child touches on its way to exec was built
     // above, before the fork, the argument strings and their
     // pointer vector and the pipe descriptors. The child calls
-    // only async signal safe functions, close and the capability
-    // drop and execvp and a write of plain bytes and _exit, and
+    // only async signal safe functions, close and the limit
+    // calls and the capability drop and execvp and a write of
+    // plain bytes and _exit, and
     // allocates nothing, so no lock or buffer the parent holds
     // can be met in a copied and locked state. The parent keeps
     // ownership of the argument storage and drops it only after
@@ -486,11 +541,17 @@ fn supervise(status_fd: i32, command: &[OsString]) -> i32 {
         unsafe {
             libc::close(read_fd);
             libc::close(status_fd);
-            let failure = match drop_capabilities() {
-                Ok(()) => {
-                    libc::execvp(file_ptr, argv_ptrs.as_ptr());
-                    Some((errno_now(), strerror(errno_now())))
-                }
+            // The limits are set first and the capabilities
+            // dropped second, and a failure of either answers
+            // through the exec error pipe below.
+            let failure = match set_task_limits(max_cpu_seconds, max_memory_bytes) {
+                Ok(()) => match drop_capabilities() {
+                    Ok(()) => {
+                        libc::execvp(file_ptr, argv_ptrs.as_ptr());
+                        Some((errno_now(), strerror(errno_now())))
+                    }
+                    Err(err) => Some(err),
+                },
                 Err(err) => Some(err),
             };
             if let Some((errno, message)) = failure {
@@ -679,6 +740,17 @@ pub fn init_main(args: &[OsString]) -> i32 {
         Some(fd) => fd,
         None => return 1,
     };
+    // The hidden ceiling options the supervisor placed after
+    // the status descriptor option, present only where the
+    // caller set the bound. A value that does not read as a
+    // count names no ceiling, as an absent option does not,
+    // because the supervisor writes only counts it validated.
+    let max_cpu_seconds: Option<u64> = opt_value(opts, "--max-cpu")
+        .and_then(|value| value.to_str())
+        .and_then(|text| text.parse().ok());
+    let max_memory_bytes: Option<u64> = opt_value(opts, "--max-memory")
+        .and_then(|value| value.to_str())
+        .and_then(|text| text.parse().ok());
     if command.is_empty() {
         return fail(status_fd, "no command was given");
     }
@@ -706,7 +778,7 @@ pub fn init_main(args: &[OsString]) -> i32 {
         status_fd,
         serde_json::json!({"event": "ready", "proc_mounted": proc_mounted}),
     );
-    supervise(status_fd, command)
+    supervise(status_fd, command, max_cpu_seconds, max_memory_bytes)
 }
 
 /// The assembly drive the test suite uses to run the assembly

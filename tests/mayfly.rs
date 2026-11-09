@@ -954,7 +954,7 @@ fn cli_reports_a_harness_error_at_125() {
 #[test]
 fn contract_carries_the_round_one_obligations() {
     let text = std::fs::read_to_string(root().join("CONTRACT.md")).unwrap();
-    for number in 1..=12 {
+    for number in 1..=13 {
         assert!(
             text.contains(&format!("Obligation MF-{} covers", number)),
             "{}",
@@ -2845,4 +2845,351 @@ fn a_run_killed_inside_prepare_leaves_nothing_unsweepable() {
     }
     assert!(glob_run_dirs(&root_dir).is_empty());
     assert!(glob_clean_markers(&root_dir).is_empty());
+}
+
+// ---------- the bounds of MF-13 ----------
+
+const BUSY_LOOP: &str = "exec('while True:' + chr(10) + '    pass')";
+
+#[test]
+fn timeout_kills_a_task_past_its_deadline_and_reports_a_harness_error() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-timeout");
+    let mut task_spec = spec(py_cmd("import time; time.sleep(30)"), tmp.path());
+    task_spec.timeout_seconds = Some(1);
+    let began = Instant::now();
+    let report = run_task_spec(&task_spec);
+    let elapsed = began.elapsed();
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some(
+            "the task did not finish within the timeout of 1 seconds and the sandbox was torn down"
+        )
+    );
+    assert_eq!(report.task_exit_code, None);
+    assert_eq!(report.task_signal, None);
+    assert_eq!(report.sandbox_removed, Some(true));
+    assert!(
+        elapsed < Duration::from_secs(25),
+        "the run stood for {:?} against a one second timeout",
+        elapsed
+    );
+}
+
+#[test]
+fn the_timeout_words_name_the_seconds_the_caller_set() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-timeout-words");
+    let mut task_spec = spec(py_cmd("import time; time.sleep(30)"), tmp.path());
+    task_spec.timeout_seconds = Some(2);
+    let report = run_task_spec(&task_spec);
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some(
+            "the task did not finish within the timeout of 2 seconds and the sandbox was torn down"
+        )
+    );
+}
+
+#[test]
+fn a_task_done_before_the_deadline_keeps_its_task_outcome() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-timeout-done");
+    let mut task_spec = spec(
+        py_cmd("import time, sys; time.sleep(0.2); sys.exit(7)"),
+        tmp.path(),
+    );
+    task_spec.timeout_seconds = Some(30);
+    let report = run_task_spec(&task_spec);
+    assert_eq!(report.outcome, Outcome::Task);
+    assert_eq!(report.task_exit_code, Some(7));
+    assert_eq!(report.error, None);
+    assert!(report.timings_ms.get(Phase::Task).is_some());
+}
+
+#[test]
+fn a_busy_task_dies_by_the_processor_limit_signal_at_its_cpu_ceiling() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-cpu-soft");
+    let mut task_spec = spec(py_cmd(BUSY_LOOP), tmp.path());
+    task_spec.max_cpu_seconds = Some(1);
+    let report = run_task_spec(&task_spec);
+    assert_eq!(report.outcome, Outcome::Task);
+    assert_eq!(report.task_signal, Some(24));
+    assert_eq!(report.task_exit_code, None);
+}
+
+#[test]
+fn a_task_that_ignores_the_processor_signal_dies_by_the_kill_signal_at_the_hard_limit() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-cpu-hard");
+    let script = format!(
+        "import signal; signal.signal(signal.SIGXCPU, signal.SIG_IGN); {}",
+        BUSY_LOOP
+    );
+    let mut task_spec = spec(py_cmd(&script), tmp.path());
+    task_spec.max_cpu_seconds = Some(1);
+    let report = run_task_spec(&task_spec);
+    assert_eq!(report.outcome, Outcome::Task);
+    assert_eq!(report.task_signal, Some(9));
+    assert_eq!(report.task_exit_code, None);
+}
+
+#[test]
+fn a_task_under_a_memory_ceiling_it_never_reaches_runs_unchanged() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-memory-unreached");
+    let mut task_spec = spec(
+        py_cmd("import sys; print('one quiet line'); sys.exit(5)"),
+        tmp.path(),
+    );
+    task_spec.max_memory_bytes = Some(1073741824);
+    let report = run_task_spec(&task_spec);
+    assert_eq!(report.outcome, Outcome::Task);
+    assert_eq!(report.task_exit_code, Some(5));
+    assert!(report.stdout_tail.contains("one quiet line"));
+}
+
+#[test]
+fn a_task_that_allocates_past_its_memory_ceiling_answers_for_the_refusal_itself() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-memory-refusal");
+    let script = "import sys\ntry:\n    blob = bytearray(3 * 268435456)\n    sys.exit(0)\nexcept MemoryError:\n    sys.exit(42)";
+    let mut task_spec = spec(py_cmd(script), tmp.path());
+    task_spec.max_memory_bytes = Some(268435456);
+    let report = run_task_spec(&task_spec);
+    assert_eq!(report.outcome, Outcome::Task);
+    assert_eq!(report.task_exit_code, Some(42));
+    assert_eq!(report.error, None);
+}
+
+#[test]
+fn a_bound_under_its_floor_is_refused_before_anything_is_prepared() {
+    ensure_helper();
+    let tmp = Tmp::new("bound-floor");
+    // A sweepable orphan stands in the root before the refused
+    // calls, planted the way the sweep pins plant theirs. The
+    // floors are enforced ahead of the orphan sweep, so the
+    // orphan still stands after every refusal. A validation
+    // seated after the sweep would take the orphan with it and
+    // the closing assertions would read an empty root either
+    // way, so the orphan is what makes the seat observable.
+    let orphan = plant_sweepable(tmp.path(), "aaaa11111111");
+    let mut timeout_spec = spec(py_cmd("pass"), tmp.path());
+    timeout_spec.timeout_seconds = Some(0);
+    let report = run_task_spec(&timeout_spec);
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("the timeout of 0 seconds stands under the floor of 1 second")
+    );
+    let mut cpu_spec = spec(py_cmd("pass"), tmp.path());
+    cpu_spec.max_cpu_seconds = Some(0);
+    let report = run_task_spec(&cpu_spec);
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("the processor ceiling of 0 seconds stands under the floor of 1 second")
+    );
+    let mut memory_spec = spec(py_cmd("pass"), tmp.path());
+    memory_spec.max_memory_bytes = Some(1024);
+    let report = run_task_spec(&memory_spec);
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("the address space ceiling of 1024 bytes stands under the floor of 16777216 bytes")
+    );
+    // The orphan the calls found standing is the only entry
+    // the root holds, and it is the orphan itself, untouched.
+    assert_eq!(glob_run_dirs(tmp.path()), vec![orphan.clone()]);
+    assert_eq!(dir_names(tmp.path()), vec!["run-aaaa11111111".to_string()]);
+    assert_eq!(
+        std::fs::read_to_string(orphan.join(".mayfly-provenance")).unwrap(),
+        "aaaa11111111\n"
+    );
+}
+
+#[test]
+fn the_bounds_never_reach_the_task_environment() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-env");
+    let script = "import json, os; print(json.dumps(dict(os.environ)))";
+    let mut task_spec = spec(py_cmd(script), tmp.path());
+    task_spec.caller_env = vec![
+        (os("PATH"), os("/usr/bin:/bin")),
+        (os("MAYFLY_LEAK_PROBE"), os("a secret value")),
+    ];
+    task_spec.timeout_seconds = Some(60);
+    task_spec.max_cpu_seconds = Some(60);
+    task_spec.max_memory_bytes = Some(1073741824);
+    let report = run_task_spec(&task_spec);
+    let seen = last_json(&report);
+    assert_eq!(
+        seen,
+        serde_json::json!({
+            "PATH": "/usr/bin:/bin",
+            "MAYFLY_SANDBOX": "namespace",
+            "PYTHONCOERCECLOCALE": "0",
+        })
+    );
+}
+
+#[test]
+fn cli_timeout_reports_a_harness_error_at_125() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-cli-timeout");
+    let mut args = vec![
+        os("run"),
+        os("--root"),
+        tmp.path().as_os_str().to_os_string(),
+        os("--timeout"),
+        os("1"),
+        os("--"),
+    ];
+    args.extend(py_cmd("import time; time.sleep(30)"));
+    let result = run_cli(&args, &[]);
+    assert_eq!(result.code, 125);
+    let payload: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(payload["outcome"], "harness_error");
+    assert_eq!(
+        payload["error"],
+        "the task did not finish within the timeout of 1 seconds and the sandbox was torn down"
+    );
+    assert_eq!(payload["task_exit_code"], serde_json::Value::Null);
+}
+
+#[test]
+fn cli_cpu_ceiling_reports_the_signal_death_at_128_plus_the_signal() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-cli-cpu");
+    let mut args = vec![
+        os("run"),
+        os("--root"),
+        tmp.path().as_os_str().to_os_string(),
+        os("--max-cpu"),
+        os("1"),
+        os("--"),
+    ];
+    args.extend(py_cmd(BUSY_LOOP));
+    let result = run_cli(&args, &[]);
+    assert_eq!(result.code, 152);
+    let payload: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(payload["outcome"], "task");
+    assert_eq!(payload["task_signal"], 24);
+    assert_eq!(payload["task_exit_code"], serde_json::Value::Null);
+}
+
+#[test]
+fn cli_rejects_a_bound_value_that_is_not_a_whole_number() {
+    let tmp = Tmp::new("bound-cli-number");
+    let mut args = vec![
+        os("run"),
+        os("--root"),
+        tmp.path().as_os_str().to_os_string(),
+        os("--timeout"),
+        os("soon"),
+        os("--"),
+    ];
+    args.extend(py_cmd("pass"));
+    let result = run_cli(&args, &[]);
+    assert_eq!(result.code, 2);
+    assert!(result
+        .stderr
+        .contains("mayfly run needs a whole number after --timeout"));
+    assert!(result.stdout.is_empty());
+}
+
+#[test]
+fn an_unbounded_runs_report_stands_as_landed() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-unbounded");
+    let result = run_cli(&cli_args(tmp.path(), &cmd(&["/bin/echo", "landed"])), &[]);
+    assert_eq!(result.code, 0);
+    let payload: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    let fields: Vec<&str> = payload
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|key| key.as_str())
+        .collect();
+    assert_eq!(
+        fields,
+        vec![
+            "backend",
+            "run_id",
+            "sandbox_dir",
+            "command",
+            "outcome",
+            "task_exit_code",
+            "task_signal",
+            "error",
+            "proc_mounted",
+            "sandbox_removed",
+            "timings_ms",
+            "stdout_tail",
+            "stderr_tail",
+        ]
+    );
+    let timing_fields: Vec<&str> = payload["timings_ms"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|key| key.as_str())
+        .collect();
+    assert_eq!(
+        timing_fields,
+        vec!["prepare", "start", "task", "teardown", "total"]
+    );
+    assert_eq!(payload["backend"], "namespace");
+    assert_eq!(
+        payload["command"],
+        serde_json::json!(["/bin/echo", "landed"])
+    );
+    assert_eq!(payload["outcome"], "task");
+    assert_eq!(payload["task_exit_code"], 0);
+    assert_eq!(payload["task_signal"], serde_json::Value::Null);
+    assert_eq!(payload["error"], serde_json::Value::Null);
+    assert_eq!(payload["sandbox_removed"], true);
+    assert_eq!(payload["stdout_tail"], "landed\n");
+    assert_eq!(payload["stderr_tail"], "");
+    let run_id = payload["run_id"].as_str().unwrap();
+    assert_eq!(run_id.len(), 12);
+    assert!(run_id
+        .chars()
+        .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    assert_eq!(
+        payload["sandbox_dir"],
+        serde_json::json!(format!("{}/run-{}", tmp.path().display(), run_id))
+    );
+    for phase in ["prepare", "start", "task", "teardown", "total"] {
+        assert!(
+            payload["timings_ms"][phase].is_number(),
+            "the {} timing did not stand as a number",
+            phase
+        );
+    }
 }
