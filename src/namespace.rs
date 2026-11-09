@@ -942,11 +942,12 @@ impl NamespaceBackend {
 }
 
 /// The refusal a run answers with where one of its bounds
-/// stands under the floor MF-13 sets for it, naming the bound
-/// and its floor, in the shape the timeout breach sets for
-/// each bound. The wording carries no prepare prefix, because
-/// nothing was prepared. None where every bound stands unset
-/// or at or over its floor.
+/// stands outside the span MF-13 accepts for it, naming the
+/// bound and the floor it stands under or the highest formable
+/// ceiling it stands over, in the shape the timeout breach
+/// sets for each bound. The wording carries no prepare
+/// prefix, because nothing was prepared. None where every
+/// bound stands unset or inside its span.
 fn floor_breach(spec: &RunSpec) -> Option<String> {
     if let Some(seconds) = spec.timeout_seconds {
         if seconds < crate::TIMEOUT_FLOOR_SECONDS {
@@ -963,6 +964,13 @@ fn floor_breach(spec: &RunSpec) -> Option<String> {
                 "the processor ceiling of {} seconds stands under the floor of {} second",
                 seconds,
                 crate::MAX_CPU_FLOOR_SECONDS
+            ));
+        }
+        if seconds > crate::MAX_CPU_CEILING_SECONDS {
+            return Some(format!(
+                "the processor ceiling of {} seconds stands over the highest formable ceiling of {} seconds",
+                seconds,
+                crate::MAX_CPU_CEILING_SECONDS
             ));
         }
     }

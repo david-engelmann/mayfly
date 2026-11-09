@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 use crate::{
     dump_pretty, get_backend, JsonValue, Outcome, RunSpec, HARNESS_EXIT_CODE,
-    MAX_CPU_FLOOR_SECONDS, MAX_MEMORY_FLOOR_BYTES, TIMEOUT_FLOOR_SECONDS,
+    MAX_CPU_CEILING_SECONDS, MAX_CPU_FLOOR_SECONDS, MAX_MEMORY_FLOOR_BYTES,
+    TIMEOUT_FLOOR_SECONDS,
 };
 
 const USAGE: &str = "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--net] [--timeout SECONDS] [--max-cpu SECONDS] [--max-memory BYTES] -- COMMAND...";
@@ -24,12 +25,16 @@ const USAGE: &str = "usage: mayfly run --root DIR [--backend NAME] [--allow-env 
 /// value under the bound floor each refuse at exit 2 in their
 /// own words, and no report is printed for any of them, as no
 /// report is printed for any malformed call. The floor text
-/// is the words the floor refusal carries for this bound.
+/// is the words the floor refusal carries for this bound. A
+/// bound that carries a ceiling refuses a value over it in
+/// the same class, in the words of its bound, and a bound
+/// with no ceiling passes none.
 fn bound_value(
     value: Option<OsString>,
     name: &str,
     floor: u64,
     floor_text: &str,
+    ceiling: Option<u64>,
     err: &mut dyn Write,
 ) -> Result<u64, i32> {
     let value = match value {
@@ -49,6 +54,12 @@ fn bound_value(
     if parsed < floor {
         let _ = writeln!(err, "mayfly run needs {} of at least {}", name, floor_text);
         return Err(2);
+    }
+    if let Some(ceiling) = ceiling {
+        if parsed > ceiling {
+            let _ = writeln!(err, "mayfly run needs {} of at most {} seconds", name, ceiling);
+            return Err(2);
+        }
     }
     Ok(parsed)
 }
@@ -132,6 +143,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
                     "--timeout",
                     TIMEOUT_FLOOR_SECONDS,
                     "1 second",
+                    None,
                     err,
                 ) {
                     Ok(value) => timeout_seconds = Some(value),
@@ -145,6 +157,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
                     "--max-cpu",
                     MAX_CPU_FLOOR_SECONDS,
                     "1 second",
+                    Some(MAX_CPU_CEILING_SECONDS),
                     err,
                 ) {
                     Ok(value) => max_cpu_seconds = Some(value),
@@ -158,6 +171,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
                     "--max-memory",
                     MAX_MEMORY_FLOOR_BYTES,
                     "16777216 bytes",
+                    None,
                     err,
                 ) {
                     Ok(value) => max_memory_bytes = Some(value),

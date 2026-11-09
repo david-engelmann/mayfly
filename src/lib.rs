@@ -37,6 +37,15 @@ pub const TIMEOUT_FLOOR_SECONDS: u64 = 1;
 pub const MAX_CPU_FLOOR_SECONDS: u64 = 1;
 pub const MAX_MEMORY_FLOOR_BYTES: u64 = 16777216;
 
+/// The highest processor ceiling whose limit pair the harness
+/// can form. The ceiling of MF-13 stands as a soft limit at the
+/// seconds the caller set and a hard limit one second past it,
+/// so the one value past this ceiling names a hard limit no
+/// count can hold. That value is refused as a caller error
+/// before any sandbox is prepared, on both surfaces, in the
+/// refusal shapes the floors use.
+pub const MAX_CPU_CEILING_SECONDS: u64 = u64::MAX - 1;
+
 /// The one monotonic clock every stamp in a run is taken from, in
 /// seconds. The runner, the init event stamps, and the interrupt
 /// receipt stamps all read this clock, so stamps taken in
