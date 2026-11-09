@@ -411,9 +411,10 @@ impl NamespaceBackend {
             report.error = Some(error);
             report.proc_mounted = Some(false);
             report.sandbox_removed = Some(true);
-            let mut timings = Timings::default();
-            timings.total = Some(ms_since(wall));
-            report.timings_ms = timings;
+            report.timings_ms = Timings {
+                total: Some(ms_since(wall)),
+                ..Timings::default()
+            };
             return report;
         }
         sweep_orphans(&spec.root);
