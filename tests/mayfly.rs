@@ -2991,9 +2991,24 @@ fn a_bound_under_its_floor_is_refused_before_anything_is_prepared() {
     // the closing assertions would read an empty root either
     // way, so the orphan is what makes the seat observable.
     let orphan = plant_sweepable(tmp.path(), "aaaa11111111");
+    // The refused calls run through a backend whose provenance
+    // writer records every call it receives and writes nothing.
+    // A preparation the cleanup hid would still pass through
+    // the writer on its way to the sandbox, so the empty record
+    // at the close is what proves no call prepared anything.
+    // The writer also names no directory and writes no file, so
+    // the root the closing assertions read carries only what
+    // the calls themselves left standing.
+    let preparations: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let record = preparations.clone();
+    let mut backend = NamespaceBackend::new();
+    backend.provenance_writer = Some(Arc::new(move |dir: &Path, _run_id: &str| {
+        record.lock().unwrap().push(dir.to_path_buf());
+        Ok(())
+    }));
     let mut timeout_spec = spec(py_cmd("pass"), tmp.path());
     timeout_spec.timeout_seconds = Some(0);
-    let report = run_task_spec(&timeout_spec);
+    let report = backend.run(&timeout_spec);
     assert_eq!(report.outcome, Outcome::HarnessError);
     assert_eq!(
         report.error.as_deref(),
@@ -3001,7 +3016,7 @@ fn a_bound_under_its_floor_is_refused_before_anything_is_prepared() {
     );
     let mut cpu_spec = spec(py_cmd("pass"), tmp.path());
     cpu_spec.max_cpu_seconds = Some(0);
-    let report = run_task_spec(&cpu_spec);
+    let report = backend.run(&cpu_spec);
     assert_eq!(report.outcome, Outcome::HarnessError);
     assert_eq!(
         report.error.as_deref(),
@@ -3009,12 +3024,15 @@ fn a_bound_under_its_floor_is_refused_before_anything_is_prepared() {
     );
     let mut memory_spec = spec(py_cmd("pass"), tmp.path());
     memory_spec.max_memory_bytes = Some(1024);
-    let report = run_task_spec(&memory_spec);
+    let report = backend.run(&memory_spec);
     assert_eq!(report.outcome, Outcome::HarnessError);
     assert_eq!(
         report.error.as_deref(),
         Some("the address space ceiling of 1024 bytes stands under the floor of 16777216 bytes")
     );
+    // No refused call reached the provenance writer, so no call
+    // prepared a sandbox the cleanup could have hidden.
+    assert!(preparations.lock().unwrap().is_empty());
     // The orphan the calls found standing is the only entry
     // the root holds, and it is the orphan itself, untouched.
     assert_eq!(glob_run_dirs(tmp.path()), vec![orphan.clone()]);
@@ -3023,6 +3041,70 @@ fn a_bound_under_its_floor_is_refused_before_anything_is_prepared() {
         std::fs::read_to_string(orphan.join(".mayfly-provenance")).unwrap(),
         "aaaa11111111\n"
     );
+}
+
+#[test]
+fn a_processor_ceiling_at_the_widest_value_is_refused_before_anything_is_prepared() {
+    ensure_helper();
+    let tmp = Tmp::new("bound-widest");
+    // The orphan and the recording writer stand as they stand
+    // in the floor pin, so the seat of this refusal is
+    // observable the same way. The widest value names a hard
+    // limit one second past itself, and no count holds that
+    // limit, so the value is refused where the floors are
+    // refused. Against code that forms the pair unchecked the
+    // run reaches the forked child instead, and its answer is
+    // a start failure in a release build and the child's own
+    // death reported as a task outcome in a checked build, and
+    // neither answer is the refusal this pin reads.
+    let orphan = plant_sweepable(tmp.path(), "bbbb22222222");
+    let preparations: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let record = preparations.clone();
+    let mut backend = NamespaceBackend::new();
+    backend.provenance_writer = Some(Arc::new(move |dir: &Path, _run_id: &str| {
+        record.lock().unwrap().push(dir.to_path_buf());
+        Ok(())
+    }));
+    let mut widest_spec = spec(py_cmd("pass"), tmp.path());
+    widest_spec.max_cpu_seconds = Some(u64::MAX);
+    let report = backend.run(&widest_spec);
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("the processor ceiling of 18446744073709551615 seconds stands over the highest formable ceiling of 18446744073709551614 seconds")
+    );
+    assert!(preparations.lock().unwrap().is_empty());
+    assert_eq!(glob_run_dirs(tmp.path()), vec![orphan.clone()]);
+    assert_eq!(dir_names(tmp.path()), vec!["run-bbbb22222222".to_string()]);
+    assert_eq!(
+        std::fs::read_to_string(orphan.join(".mayfly-provenance")).unwrap(),
+        "bbbb22222222\n"
+    );
+}
+
+#[test]
+fn cli_refuses_the_widest_processor_ceiling_at_2() {
+    ensure_helper();
+    let tmp = Tmp::new("bound-cli-widest");
+    let mut out: Vec<u8> = Vec::new();
+    let mut err: Vec<u8> = Vec::new();
+    let mut args = vec![
+        os("run"),
+        os("--root"),
+        tmp.path().as_os_str().to_os_string(),
+        os("--max-cpu"),
+        os("18446744073709551615"),
+        os("--"),
+    ];
+    args.extend(py_cmd("pass"));
+    let code = cli_main(&args, &mut out, &mut err);
+    assert_eq!(code, 2);
+    assert!(out.is_empty());
+    assert_eq!(
+        String::from_utf8(err).unwrap(),
+        "mayfly run needs --max-cpu of at most 18446744073709551614 seconds\n"
+    );
+    assert_eq!(dir_names(tmp.path()), Vec::<String>::new());
 }
 
 #[test]

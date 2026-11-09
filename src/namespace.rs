@@ -394,13 +394,13 @@ impl NamespaceBackend {
 
     pub fn run(&self, spec: &RunSpec) -> RunReport {
         let wall = now();
-        // The floors of MF-13 are enforced here, in one place
+        // The bounds of MF-13 are enforced here, in one place
         // for both surfaces, ahead of the orphan sweep and
         // ahead of anything created under the root, so a bound
-        // under its floor prepares nothing at all. The command
+        // outside its span prepares nothing at all. The command
         // line refuses the same values at parse time in its own
         // class and never reaches this answer.
-        if let Some(error) = floor_breach(spec) {
+        if let Some(error) = bound_breach(spec) {
             let mut report = RunReport::new(
                 self.name(),
                 "",
@@ -942,12 +942,13 @@ impl NamespaceBackend {
 }
 
 /// The refusal a run answers with where one of its bounds
-/// stands under the floor MF-13 sets for it, naming the bound
-/// and its floor, in the shape the timeout breach sets for
-/// each bound. The wording carries no prepare prefix, because
-/// nothing was prepared. None where every bound stands unset
-/// or at or over its floor.
-fn floor_breach(spec: &RunSpec) -> Option<String> {
+/// stands outside the span MF-13 accepts for it, naming the
+/// bound and the floor it stands under or the highest formable
+/// ceiling it stands over, in the shape the timeout breach
+/// sets for each bound. The wording carries no prepare
+/// prefix, because nothing was prepared. None where every
+/// bound stands unset or inside its span.
+fn bound_breach(spec: &RunSpec) -> Option<String> {
     if let Some(seconds) = spec.timeout_seconds {
         if seconds < crate::TIMEOUT_FLOOR_SECONDS {
             return Some(format!(
@@ -963,6 +964,13 @@ fn floor_breach(spec: &RunSpec) -> Option<String> {
                 "the processor ceiling of {} seconds stands under the floor of {} second",
                 seconds,
                 crate::MAX_CPU_FLOOR_SECONDS
+            ));
+        }
+        if seconds > crate::MAX_CPU_CEILING_SECONDS {
+            return Some(format!(
+                "the processor ceiling of {} seconds stands over the highest formable ceiling of {} seconds",
+                seconds,
+                crate::MAX_CPU_CEILING_SECONDS
             ));
         }
     }
