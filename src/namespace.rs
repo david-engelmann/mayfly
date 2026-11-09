@@ -394,13 +394,13 @@ impl NamespaceBackend {
 
     pub fn run(&self, spec: &RunSpec) -> RunReport {
         let wall = now();
-        // The floors of MF-13 are enforced here, in one place
+        // The bounds of MF-13 are enforced here, in one place
         // for both surfaces, ahead of the orphan sweep and
         // ahead of anything created under the root, so a bound
-        // under its floor prepares nothing at all. The command
+        // outside its span prepares nothing at all. The command
         // line refuses the same values at parse time in its own
         // class and never reaches this answer.
-        if let Some(error) = floor_breach(spec) {
+        if let Some(error) = bound_breach(spec) {
             let mut report = RunReport::new(
                 self.name(),
                 "",
@@ -948,7 +948,7 @@ impl NamespaceBackend {
 /// sets for each bound. The wording carries no prepare
 /// prefix, because nothing was prepared. None where every
 /// bound stands unset or inside its span.
-fn floor_breach(spec: &RunSpec) -> Option<String> {
+fn bound_breach(spec: &RunSpec) -> Option<String> {
     if let Some(seconds) = spec.timeout_seconds {
         if seconds < crate::TIMEOUT_FLOOR_SECONDS {
             return Some(format!(
