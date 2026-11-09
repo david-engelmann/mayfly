@@ -2983,6 +2983,14 @@ fn a_task_that_allocates_past_its_memory_ceiling_answers_for_the_refusal_itself(
 fn a_bound_under_its_floor_is_refused_before_anything_is_prepared() {
     ensure_helper();
     let tmp = Tmp::new("bound-floor");
+    // A sweepable orphan stands in the root before the refused
+    // calls, planted the way the sweep pins plant theirs. The
+    // floors are enforced ahead of the orphan sweep, so the
+    // orphan still stands after every refusal. A validation
+    // seated after the sweep would take the orphan with it and
+    // the closing assertions would read an empty root either
+    // way, so the orphan is what makes the seat observable.
+    let orphan = plant_sweepable(tmp.path(), "aaaa11111111");
     let mut timeout_spec = spec(py_cmd("pass"), tmp.path());
     timeout_spec.timeout_seconds = Some(0);
     let report = run_task_spec(&timeout_spec);
@@ -3007,8 +3015,14 @@ fn a_bound_under_its_floor_is_refused_before_anything_is_prepared() {
         report.error.as_deref(),
         Some("the address space ceiling of 1024 bytes stands under the floor of 16777216 bytes")
     );
-    assert!(glob_run_dirs(tmp.path()).is_empty());
-    assert!(dir_names(tmp.path()).is_empty());
+    // The orphan the calls found standing is the only entry
+    // the root holds, and it is the orphan itself, untouched.
+    assert_eq!(glob_run_dirs(tmp.path()), vec![orphan.clone()]);
+    assert_eq!(dir_names(tmp.path()), vec!["run-aaaa11111111".to_string()]);
+    assert_eq!(
+        std::fs::read_to_string(orphan.join(".mayfly-provenance")).unwrap(),
+        "aaaa11111111\n"
+    );
 }
 
 #[test]
