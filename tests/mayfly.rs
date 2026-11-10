@@ -2880,6 +2880,62 @@ fn timeout_kills_a_task_past_its_deadline_and_reports_a_harness_error() {
 }
 
 #[test]
+fn a_second_timeout_value_kills_at_its_own_deadline_and_reports_a_harness_error() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-timeout-second");
+    let mut task_spec = spec(py_cmd("import time; time.sleep(30)"), tmp.path());
+    task_spec.timeout_seconds = Some(2);
+    let began = Instant::now();
+    let report = run_task_spec(&task_spec);
+    let elapsed = began.elapsed();
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some(
+            "the task did not finish within the timeout of 2 seconds and the sandbox was torn down"
+        )
+    );
+    assert_eq!(report.task_exit_code, None);
+    assert_eq!(report.task_signal, None);
+    assert_eq!(report.sandbox_removed, Some(true));
+    assert!(
+        elapsed < Duration::from_secs(25),
+        "the run stood for {:?} against a two second timeout",
+        elapsed
+    );
+}
+
+#[test]
+fn a_task_still_running_past_a_close_deadline_is_killed_at_the_deadline() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-timeout-close");
+    let mut task_spec = spec(py_cmd("import time; time.sleep(3)"), tmp.path());
+    task_spec.timeout_seconds = Some(2);
+    let began = Instant::now();
+    let report = run_task_spec(&task_spec);
+    let elapsed = began.elapsed();
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some(
+            "the task did not finish within the timeout of 2 seconds and the sandbox was torn down"
+        )
+    );
+    assert_eq!(report.task_exit_code, None);
+    assert_eq!(report.task_signal, None);
+    assert_eq!(report.sandbox_removed, Some(true));
+    assert!(
+        elapsed < Duration::from_millis(2750),
+        "the run stood for {:?} against a two second deadline",
+        elapsed
+    );
+}
+
+#[test]
 fn the_timeout_words_name_the_seconds_the_caller_set() {
     if !require_sandbox() {
         return;
