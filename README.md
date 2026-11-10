@@ -43,10 +43,10 @@ Mayfly builds from source with Cargo. Clone the repo and install the binary onto
 ```
 git clone https://github.com/david-engelmann/mayfly.git
 cd mayfly
-cargo install --path .
+cargo install --path . --bin mayfly
 ```
 
-The install puts the mayfly binary in the Cargo bin directory. On a default install that directory is ~/.cargo/bin, and it must stand on your PATH for the mayfly command to resolve. Mayfly runs on Linux and is wired for x86_64 and aarch64 machines.
+The install puts the mayfly binary in the Cargo bin directory. On a default install that directory is ~/.cargo/bin, and it must stand on your PATH for the mayfly command to resolve. The command names the mayfly binary on purpose. The repo also builds a codepoint_scan helper, and a machine that already carries that helper from a sibling repo refuses a plain install, so the named form installs mayfly alone. Mayfly runs on Linux and is wired for x86_64 and aarch64 machines.
 
 ## Quickstart
 
