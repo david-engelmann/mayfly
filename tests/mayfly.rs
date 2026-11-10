@@ -2986,6 +2986,28 @@ fn a_busy_task_dies_by_the_processor_limit_signal_at_its_cpu_ceiling() {
 }
 
 #[test]
+fn a_busy_task_under_a_timeout_dies_by_its_cpu_ceiling_before_the_timeout() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("bound-cpu-bounded");
+    let mut task_spec = spec(py_cmd(BUSY_LOOP), tmp.path());
+    task_spec.max_cpu_seconds = Some(1);
+    task_spec.timeout_seconds = Some(10);
+    let began = Instant::now();
+    let report = run_task_spec(&task_spec);
+    let elapsed = began.elapsed();
+    assert_eq!(report.outcome, Outcome::Task);
+    assert_eq!(report.task_signal, Some(24));
+    assert_eq!(report.task_exit_code, None);
+    assert!(
+        elapsed < Duration::from_secs(9),
+        "the run stood for {:?} against its one second processor ceiling",
+        elapsed
+    );
+}
+
+#[test]
 fn a_task_that_ignores_the_processor_signal_dies_by_the_kill_signal_at_the_hard_limit() {
     if !require_sandbox() {
         return;
