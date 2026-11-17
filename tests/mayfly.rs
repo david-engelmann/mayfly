@@ -1201,6 +1201,26 @@ fn a_large_task_output_is_bounded_to_its_tail() {
     assert!(report.stdout_tail.ends_with("the-end-marker"));
 }
 
+#[test]
+fn tail_buffer_reads_back_the_last_chars_after_small_feeds() {
+    let buffer = mayfly::TailBuffer::new();
+    let unit = "aé€b";
+    let mut fed = String::new();
+    while fed.len() < 3 * mayfly::TAIL_BYTES {
+        fed.push_str(unit);
+    }
+    let bytes = fed.as_bytes();
+    let split = bytes.len() - 4096;
+    for chunk in bytes[..split].chunks(100) {
+        buffer.feed(chunk);
+    }
+    for byte in &bytes[split..] {
+        buffer.feed(&[*byte]);
+    }
+    let expected: String = fed.chars().skip(fed.chars().count() - TAIL_CHARS).collect();
+    assert_eq!(buffer.text(), expected);
+}
+
 // ---------- supervisor death and the layered cleanup ----------
 
 fn signal_child(child: &Child, signal: i32) {

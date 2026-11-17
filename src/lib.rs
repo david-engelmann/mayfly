@@ -933,7 +933,15 @@ impl TailBuffer {
     pub fn feed(&self, chunk: &[u8]) {
         let mut buf = self.buf.lock().unwrap();
         buf.extend_from_slice(chunk);
-        if buf.len() > self.limit {
+        // The drain waits until the buffer stands at twice
+        // the limit and then cuts back to the limit, so the
+        // retained window moves about once per limit of new
+        // bytes instead of once per chunk. text() keeps only
+        // the last TAIL_CHARS characters, and a buffer at the
+        // limit already decodes to more characters than that,
+        // so the deeper head the batching leaves standing is
+        // discarded unread either way.
+        if buf.len() >= 2 * self.limit {
             let overflow = buf.len() - self.limit;
             buf.drain(..overflow);
         }
