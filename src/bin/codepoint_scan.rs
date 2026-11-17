@@ -18,10 +18,15 @@
 //! error at exit 2, where the setup scanner let the failure escape
 //! as a traceback at exit 1. The walk excludes directories by name
 //! below the scan root, so the name of an ancestor of the root can
-//! never exclude the root itself, and every file in the tree is
-//! scanned, whatever its name or suffix, apart from the known
-//! binary suffixes, and a file that does not decode as UTF-8 fails
-//! the scan loudly instead of passing unseen.
+//! never exclude the root itself, and every regular file in
+//! the tree is scanned, whatever its name or suffix, apart from
+//! the known binary suffixes, and a file that does not decode as
+//! UTF-8 fails the scan loudly instead of passing unseen. A
+//! special file, a pipe or a socket or a device, is never
+//! collected, and neither is a link whose target is not a
+//! regular file, so debris standing in a scanned tree can
+//! neither hang the scan on a read that never ends nor fail it
+//! on a read that cannot start.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -66,7 +71,7 @@ fn collect(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), ScanError> {
             .map_err(|err| ScanError(format!("cannot read {}, {err}", path.display())))?;
         if file_type.is_dir() {
             dirs.push(path);
-        } else if !file_type.is_symlink() || !path.is_dir() {
+        } else if file_type.is_file() || (file_type.is_symlink() && path.is_file()) {
             files.push(path);
         }
     }
