@@ -1511,6 +1511,60 @@ fn an_interrupted_run_reports_the_unfinished_task_phase_as_null() {
     assert!(glob_run_dirs(tmp.path()).is_empty());
 }
 
+#[test]
+fn two_signals_at_once_name_one_whole_first_signal() {
+    // Two signals delivered at the same moment can be handled
+    // on different threads of the supervisor. The report must
+    // name one whole first signal, one of the two that were
+    // sent, with the run torn down as an interrupted run. A
+    // snapshot that mixed the pair could name a signal that
+    // was never sent or lose the interrupt entirely, and the
+    // assertions below read for exactly those shapes. The
+    // window the Round 1 register names for this finding is
+    // two deliveries inside one load to store gap, which no
+    // pin can stage on purpose, so this pin drives the
+    // deliveries as close together as two threads released
+    // from one barrier can make them and holds the report's
+    // coherence against whatever interleaving the host picks.
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("two-signals");
+    let marker = format!("mayfly-death-{}", unique_hex());
+    let mut proc = start_cli_with_sleeping_task(tmp.path(), &marker);
+    let_the_run_get_under_way();
+    let pid = proc.id();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let mut senders = Vec::new();
+    for signum in [libc::SIGINT, libc::SIGTERM] {
+        let barrier = Arc::clone(&barrier);
+        senders.push(std::thread::spawn(move || {
+            barrier.wait();
+            unsafe {
+                libc::kill(pid as i32, signum);
+            }
+        }));
+    }
+    for sender in senders {
+        let _ = sender.join();
+    }
+    let (code, out) = communicate(&mut proc, 30.0);
+    assert_eq!(code, 125);
+    let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(payload["outcome"], "harness_error");
+    let error = payload["error"].as_str().unwrap();
+    assert!(
+        error.contains("interrupted by signal 2") || error.contains("interrupted by signal 15"),
+        "{}",
+        error
+    );
+    assert!(wait_until(
+        || host_pids_with_marker(&marker).is_empty(),
+        15.0
+    ));
+    assert!(glob_run_dirs(tmp.path()).is_empty());
+}
+
 // ---------- wording pins ----------
 
 #[test]

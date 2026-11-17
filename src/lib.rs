@@ -18,7 +18,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 pub use namespace::NamespaceBackend;
@@ -804,20 +804,31 @@ pub struct SignalGuard {
     prev_term: Option<libc::sigaction>,
 }
 
-static SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SIGNAL_PUBLISHED: AtomicBool = AtomicBool::new(false);
 static SIGNAL_FIRST: AtomicI32 = AtomicI32::new(0);
 static SIGNAL_FIRST_TIME: AtomicU64 = AtomicU64::new(0);
+static SIGNAL_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn record_signal(signum: i32) {
-    // The snapshot is stored before the count moves, and the
-    // count store releases it, so a reader that acquires a
-    // nonzero count always sees the first signal and its stamp
-    // whole, and never a count standing over an unstamped zero.
-    if SIGNAL_COUNT.load(Ordering::SeqCst) == 0 {
+    // The snapshot is claimed by a swap on a dedicated flag, so
+    // exactly one handler writes the signum and its stamp, and
+    // only that handler publishes them, setting the published
+    // flag after both stores land. A reader that acquires the
+    // flag therefore always sees the first signal and its stamp
+    // whole, written by the one handler that claimed them, and
+    // never a publication standing over an unwritten pair. A
+    // handler that loses the claim publishes nothing, because
+    // a publication a losing handler could move would let a
+    // reader observe it before the claimant's stores land.
+    // Two signals handled on different threads at the same
+    // moment cannot interleave their stores either, because
+    // only the handler whose swap takes the claim flag from
+    // false to true writes the pair at all.
+    if !SIGNAL_CLAIMED.swap(true, Ordering::SeqCst) {
         SIGNAL_FIRST.store(signum, Ordering::Release);
         SIGNAL_FIRST_TIME.store(now().to_bits(), Ordering::Release);
+        SIGNAL_PUBLISHED.store(true, Ordering::Release);
     }
-    SIGNAL_COUNT.fetch_add(1, Ordering::Release);
 }
 
 fn is_main_thread() -> bool {
@@ -837,7 +848,8 @@ impl SignalGuard {
         if !is_main_thread() {
             return guard;
         }
-        SIGNAL_COUNT.store(0, Ordering::SeqCst);
+        SIGNAL_CLAIMED.store(false, Ordering::SeqCst);
+        SIGNAL_PUBLISHED.store(false, Ordering::SeqCst);
         SIGNAL_FIRST.store(0, Ordering::SeqCst);
         SIGNAL_FIRST_TIME.store(0, Ordering::SeqCst);
         // The action struct is fully initialised before the
@@ -864,7 +876,7 @@ impl SignalGuard {
     }
 
     pub fn interrupted(&self) -> bool {
-        self.installed && SIGNAL_COUNT.load(Ordering::Acquire) > 0
+        self.installed && SIGNAL_PUBLISHED.load(Ordering::Acquire)
     }
 
     pub fn first(&self) -> Option<i32> {
