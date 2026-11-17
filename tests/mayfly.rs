@@ -2739,7 +2739,6 @@ fn cli_treats_an_option_shaped_token_after_a_value_option_as_a_missing_value() {
     assert!(glob_run_dirs(tmp.path()).is_empty());
 }
 
-
 #[test]
 fn cli_refuses_the_malformed_call_shapes_at_2() {
     // The missing value refusal is pinned, and the bound
