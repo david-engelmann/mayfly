@@ -183,7 +183,6 @@ fn ci_runs_the_local_gate_commands() {
     assert!(commands.iter().any(|c| c == CLIPPY_COMMAND));
 }
 
-
 fn toolchain_pins_all_full(text: &str) -> bool {
     let mut seen = false;
     for line in text.lines() {
