@@ -371,6 +371,7 @@ fn opt_float(value: Option<f64>) -> JsonValue {
 /// A minimal json value used only to print reports the way the
 /// Python harness printed them, with two space indentation and
 /// non-ascii text escaped the way Python escapes it.
+#[derive(Debug, Clone)]
 pub enum JsonValue {
     Null,
     Bool(bool),

@@ -3607,3 +3607,21 @@ fn an_unbounded_runs_report_stands_as_landed() {
         );
     }
 }
+
+#[test]
+fn json_value_debug_and_clone_stand_with_the_other_public_types() {
+    let value = mayfly::JsonValue::Object(vec![
+        (
+            "backend".to_string(),
+            mayfly::JsonValue::Str("namespace".to_string()),
+        ),
+        ("task_exit_code".to_string(), mayfly::JsonValue::Int(7)),
+        (
+            "flags".to_string(),
+            mayfly::JsonValue::List(vec![mayfly::JsonValue::Bool(true), mayfly::JsonValue::Null]),
+        ),
+    ]);
+    let cloned = value.clone();
+    assert_eq!(format!("{:?}", cloned), format!("{:?}", value));
+    assert!(format!("{:?}", value).contains("Int(7)"));
+}
