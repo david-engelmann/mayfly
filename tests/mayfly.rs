@@ -3850,3 +3850,39 @@ fn cli_unknown_backend_reports_the_full_report_shape() {
     assert_eq!(payload["stdout_tail"], "");
     assert_eq!(payload["stderr_tail"], "");
 }
+
+#[test]
+fn the_report_writer_escapes_non_ascii_and_control_text_the_python_way() {
+    // Every string in a printed report passes through the
+    // one JSON writer, whose stated contract is the Python
+    // harness's escaping, every non-ascii character written
+    // as a unicode escape. The suite's other report pins
+    // parse the printed JSON back into values, and parsing
+    // cannot tell the escaped form from the raw character,
+    // so the writer's branches stood unexercised. This pin
+    // reads the printed text itself for a tail carrying one
+    // character per branch.
+    let mut report = RunReport::new(
+        "namespace",
+        "abcdef012345",
+        "/nonexistent",
+        cmd(&["/bin/echo"]),
+        Outcome::Task,
+    );
+    report.stdout_tail =
+        "caf\u{e9} \u{20ac} \u{1f600} \u{1} \"quoted\" back\\slash\n".to_string();
+    let printed = report.to_json();
+    for escaped in [
+        "caf\\u00e9",
+        "\\u20ac",
+        "\\ud83d\\ude00",
+        "\\u0001",
+        "\\\"quoted\\\"",
+        "back\\\\slash",
+        "slash\\n",
+    ] {
+        assert!(printed.contains(escaped), "{}", escaped);
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&printed).unwrap();
+    assert_eq!(parsed["stdout_tail"], report.stdout_tail);
+}
