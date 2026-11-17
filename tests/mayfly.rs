@@ -3564,7 +3564,6 @@ fn cli_refuses_the_widest_processor_ceiling_at_2() {
     assert_eq!(dir_names(tmp.path()), Vec::<String>::new());
 }
 
-
 #[test]
 fn cli_refuses_a_bound_value_under_its_floor_at_2() {
     // The library floor refusals are pinned word for word
