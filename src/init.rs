@@ -700,7 +700,10 @@ fn token_refusal(subcommand: &str) -> bool {
     match std::env::var(crate::INTERNAL_TOKEN_ENV) {
         Ok(value) if crate::token_shape_ok(&value) => false,
         _ => {
-            eprintln!("mayfly {} refuses to run without the internal run token", subcommand);
+            eprintln!(
+                "mayfly {} refuses to run without the internal run token",
+                subcommand
+            );
             true
         }
     }
