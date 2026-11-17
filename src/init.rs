@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
-use crate::{now, py_os_error_path, strerror};
+use crate::{now, py_os_error, py_os_error_path, strerror};
 
 pub const MS_BIND: u64 = 4096;
 pub const MS_REC: u64 = 16384;
@@ -99,11 +99,9 @@ pub fn real_mount(
     };
     if rc != 0 {
         let errno = errno_now();
-        return Err(format!(
-            "[Errno {}] {}: '{}'",
-            errno,
-            strerror(errno),
-            target
+        return Err(py_os_error_path(
+            &io::Error::from_raw_os_error(errno),
+            Path::new(target),
         ));
     }
     Ok(())
@@ -316,11 +314,9 @@ pub fn enter_root(rootfs: &Path) -> Result<(), String> {
     let rc = unsafe { libc::syscall(number, new_root.as_ptr(), put_old.as_ptr()) };
     if rc != 0 {
         let errno = errno_now();
-        return Err(format!(
-            "[Errno {}] {}: '{}'",
-            errno,
-            strerror(errno),
-            rootfs_text
+        return Err(py_os_error_path(
+            &io::Error::from_raw_os_error(errno),
+            Path::new(&rootfs_text),
         ));
     }
     std::env::set_current_dir("/").map_err(|err| py_os_error_path(&err, Path::new("/")))?;
@@ -331,10 +327,9 @@ pub fn enter_root(rootfs: &Path) -> Result<(), String> {
     let rc = unsafe { libc::umount2(old.as_ptr(), MNT_DETACH) };
     if rc != 0 {
         let errno = errno_now();
-        return Err(format!(
-            "[Errno {}] {}: '/.oldroot'",
-            errno,
-            strerror(errno)
+        return Err(py_os_error_path(
+            &io::Error::from_raw_os_error(errno),
+            Path::new("/.oldroot"),
         ));
     }
     std::fs::remove_dir("/.oldroot")
@@ -684,7 +679,7 @@ fn set_hostname() -> Result<(), String> {
     let rc = unsafe { libc::sethostname(name.as_ptr(), HOSTNAME.len()) };
     if rc != 0 {
         let errno = errno_now();
-        return Err(format!("[Errno {}] {}", errno, strerror(errno)));
+        return Err(py_os_error(&io::Error::from_raw_os_error(errno)));
     }
     Ok(())
 }
