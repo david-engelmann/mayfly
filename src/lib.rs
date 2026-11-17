@@ -295,6 +295,23 @@ impl RunReport {
         }
     }
 
+    /// The report of a run refused before anything was
+    /// prepared. No run id and no sandbox directory stand on
+    /// it, the error is set, no proc is mounted, and the
+    /// sandbox stands recorded as removed because none was
+    /// created. The backend's bound refusal and random draw
+    /// refusal and the command line's unknown backend refusal
+    /// all answer with this shape, and a caller whose refusal
+    /// still measures the run's total time sets that timing
+    /// on the report it gets back.
+    pub fn early_refusal(backend: &str, command: Vec<OsString>, error: String) -> RunReport {
+        let mut report = RunReport::new(backend, "", "", command, Outcome::HarnessError);
+        report.error = Some(error);
+        report.proc_mounted = Some(false);
+        report.sandbox_removed = Some(true);
+        report
+    }
+
     pub fn to_json(&self) -> String {
         let mut timings: Vec<(String, JsonValue)> = Vec::new();
         for phase in Phase::ALL {

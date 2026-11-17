@@ -247,14 +247,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
     spec.max_memory_bytes = max_memory_bytes;
     let report = match get_backend(&backend) {
         Ok(backend_impl) => backend_impl.run(&spec),
-        Err(exc) => {
-            let mut report =
-                RunReport::new(&backend, "", "", command.clone(), Outcome::HarnessError);
-            report.error = Some(exc.0);
-            report.proc_mounted = Some(false);
-            report.sandbox_removed = Some(true);
-            report
-        }
+        Err(exc) => RunReport::early_refusal(&backend, command.clone(), exc.0),
     };
     let _ = writeln!(out, "{}", report.to_json());
     if report.outcome == Outcome::HarnessError {
