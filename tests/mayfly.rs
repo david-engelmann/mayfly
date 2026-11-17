@@ -3869,8 +3869,7 @@ fn the_report_writer_escapes_non_ascii_and_control_text_the_python_way() {
         cmd(&["/bin/echo"]),
         Outcome::Task,
     );
-    report.stdout_tail =
-        "caf\u{e9} \u{20ac} \u{1f600} \u{1} \"quoted\" back\\slash\n".to_string();
+    report.stdout_tail = "caf\u{e9} \u{20ac} \u{1f600} \u{1} \"quoted\" back\\slash\n".to_string();
     let printed = report.to_json();
     for escaped in [
         "caf\\u00e9",
