@@ -23,8 +23,19 @@ use std::sync::{Mutex, OnceLock};
 
 pub use namespace::NamespaceBackend;
 
+/// The exit code a harness error answers at on the command line.
+/// A task exit code is mirrored exactly and a task killed by a
+/// signal answers at 128 plus the signal number, so the three
+/// outcomes never share a code.
 pub const HARNESS_EXIT_CODE: i32 = 125;
+/// The widest tail of one task stream the report carries, in
+/// characters. The tail buffer's text trims its decode to the
+/// last TAIL_CHARS characters.
 pub const TAIL_CHARS: usize = 4000;
+/// The byte bound the tail buffer holds a stream's tail against.
+/// The buffer cuts back to this bound once it stands at twice
+/// it, so the retained window moves about once per bound of new
+/// bytes instead of once per chunk.
 pub const TAIL_BYTES: usize = 1 << 16;
 
 /// The lowest value each bound of MF-13 accepts. A value under
@@ -97,6 +108,10 @@ pub fn py_os_error_path(err: &io::Error, path: &Path) -> String {
     }
 }
 
+/// The message the C library carries for an errno, or an
+/// unknown error line naming the number where it carries none.
+/// This is the text the Python shaped error strings are built
+/// from.
 pub fn strerror(errno: i32) -> String {
     // strerror returns a pointer to a static string or null for
     // an errno it does not know, and the CStr read copies the
@@ -125,10 +140,28 @@ impl std::error::Error for HarnessError {}
 /// One task to run in one fresh sandbox.
 #[derive(Debug, Clone)]
 pub struct RunSpec {
+    /// The command the task runs, its program first, in the form
+    /// the exec receives it.
     pub command: Vec<OsString>,
+    /// The run root the run's sandbox directory is created
+    /// under, and the directory the orphan sweep reads before
+    /// the run prepares its own.
     pub root: PathBuf,
+    /// The caller environment keys the scrub carries into the
+    /// sandbox. RunSpec::new defaults the list to PATH alone,
+    /// and naming any key replaces that default whole, so a
+    /// caller who wants a key beside PATH names both.
     pub allow_env: Vec<OsString>,
+    /// Whether the task shares the host network. False, the
+    /// default, gives the task a fresh network namespace
+    /// holding only the loopback; true shares the host network.
     pub network: bool,
+    /// Descriptors the caller hands the task across the sandbox
+    /// boundary, kept at their own numbers in the task. This is
+    /// the one caller granted exception to the isolation the
+    /// contract states, named in MF-1. A descriptor handed over
+    /// this way is the caller's own grant to the task and stands
+    /// outside the scrub and the prepared root by that choice.
     pub pass_fds: Vec<std::os::unix::io::RawFd>,
     /// A snapshot of the caller environment the scrub reads, taken
     /// by the caller. Where this is empty the live process
@@ -150,6 +183,9 @@ pub struct RunSpec {
 }
 
 impl RunSpec {
+    /// A spec carrying the defaults, allow_env at PATH alone,
+    /// the network off, no handed descriptors, no caller
+    /// environment snapshot, and no bound of MF-13 set.
     pub fn new(command: Vec<OsString>, root: PathBuf) -> RunSpec {
         RunSpec {
             command,
@@ -513,6 +549,10 @@ pub fn get_backend(name: &str) -> Result<NamespaceBackend, HarnessError> {
     }
 }
 
+/// The names get_backend resolves, in registry order. The two
+/// move together, so a backend that joins the registry joins this
+/// list in the same change, and a name that leaves the one
+/// leaves the other.
 pub fn backend_names() -> Vec<&'static str> {
     vec!["namespace"]
 }
@@ -533,6 +573,11 @@ pub fn run_task(
 /// this at the built binary once, through set_helper_exe.
 static HELPER_EXE: OnceLock<PathBuf> = OnceLock::new();
 
+/// The mayfly binary the backend re-invokes for its init and
+/// janitor. It is the path set_helper_exe set where a harness set
+/// one, and this process's own executable path where none did,
+/// falling back to the name mayfly where that path cannot be
+/// read.
 pub fn helper_exe() -> PathBuf {
     if let Some(path) = HELPER_EXE.get() {
         return path.clone();
@@ -540,11 +585,24 @@ pub fn helper_exe() -> PathBuf {
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mayfly"))
 }
 
+/// Point helper_exe at the built mayfly binary, for a test
+/// harness whose own executable is not that binary. The
+/// setting takes once, and a later call is silently refused, the
+/// once contract the suite relies on.
 pub fn set_helper_exe(path: &Path) {
     let _ = HELPER_EXE.set(path.to_path_buf());
 }
 
+/// The name of the provenance file standing inside every
+/// sandbox directory, carrying the id of the run that created
+/// the directory. The orphan sweep trusts a directory whose
+/// provenance names the directory's own run id, an
+/// identification the sweep's own doc bounds.
 pub const PROVENANCE_NAME: &str = ".mayfly-provenance";
+/// The byte bound the provenance read accumulates against. A
+/// provenance standing past it reads as no provenance at all,
+/// so an oversize file planted at the path names nothing the
+/// sweep can trust.
 pub const PROVENANCE_READ_LIMIT: usize = 4096;
 
 /// The environment key the supervisor uses to hand the per run
@@ -718,14 +776,23 @@ fn read_proc_table(proc_dir: &Path) -> Option<ProcTable> {
     Some(ProcTable { lines })
 }
 
+/// The pids whose command lines in the process table at
+/// proc_dir name path, or None where that table could not be
+/// read whole. The None is load bearing. It says liveness is
+/// unknown, where Some of an empty list says the table read
+/// clean and nothing live names the path.
 pub fn pids_referencing_in(proc_dir: &Path, path: &Path) -> Option<Vec<u32>> {
     read_proc_table(proc_dir).map(|table| table.referencing(path))
 }
 
+/// pids_referencing_in against the live process table at
+/// /proc.
 pub fn pids_referencing(path: &Path) -> Option<Vec<u32>> {
     pids_referencing_in(Path::new("/proc"), path)
 }
 
+/// Whether needle stands anywhere in haystack, byte for byte.
+/// An empty needle stands in every haystack.
 pub fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
@@ -738,6 +805,10 @@ pub fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+/// The seconds a sandbox directory must stand untouched
+/// before the orphan sweep will judge it, so a run still
+/// being prepared by a concurrent process is never swept
+/// from under its maker.
 pub const ORPHAN_GRACE_SECONDS: f64 = 5.0;
 
 /// Remove sandbox directories under root whose runs are dead.
@@ -842,6 +913,9 @@ fn sweep_one(
     }
 }
 
+/// sweep_orphans_in against the live process table at /proc.
+/// Every run calls this on its root before it prepares its
+/// own sandbox.
 pub fn sweep_orphans(root: &Path) {
     sweep_orphans_in(root, Path::new("/proc"));
 }
@@ -1032,6 +1106,9 @@ pub fn current_env() -> Vec<(OsString, OsString)> {
     std::env::vars_os().collect()
 }
 
+/// The value standing under key in an environment list, the
+/// first standing where a key stands twice, or None where it
+/// does not stand.
 pub fn env_lookup<'a>(env: &'a [(OsString, OsString)], key: &OsStr) -> Option<&'a OsStr> {
     env.iter()
         .find(|(k, _)| k.as_os_str() == key)
