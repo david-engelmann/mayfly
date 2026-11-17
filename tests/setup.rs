@@ -7,6 +7,7 @@
 //! Rust gate commands of amended obligation S2, and the contract
 //! substance pin asserts the amended S2 phrases.
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -400,4 +401,67 @@ fn codepoint_scan_skips_a_file_with_an_uppercase_binary_suffix() {
     assert_eq!(result.status, 0);
     assert!(result.stdout.contains("em dash U+2014 count 0"));
     assert!(result.stdout.contains("en dash U+2013 count 0"));
+}
+
+fn mkfifo(path: &Path) {
+    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o666) };
+    assert_eq!(rc, 0, "mkfifo failed for {}", path.display());
+}
+
+fn scan_tree_bounded(root: &Path, timeout_secs: u64) -> ScanOutput {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(scan_tree(&root));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(timeout_secs))
+        .expect("the scan did not finish inside its bound")
+}
+
+#[test]
+fn codepoint_scan_completes_over_a_fifo_in_the_tree() {
+    // A pipe standing in a scanned tree is debris, not
+    // content. A scan that collects it blocks on the read
+    // until a writer appears, which is to say forever, so the
+    // scan runs here under a bound and the pin fails on the
+    // bound instead of hanging the suite. The scan completes
+    // with the clean file's zero counts.
+    let dir = temp_dir("fifo");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    mkfifo(&dir.join("planted-pipe"));
+    let result = scan_tree_bounded(&dir, 30);
+    assert_eq!(result.status, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+}
+
+#[test]
+fn codepoint_scan_completes_over_a_dangling_symlink() {
+    // A link whose target is gone is debris as well. A scan
+    // that collects it fails the whole scan at exit 2 on a
+    // read that cannot start, over a file that was never
+    // content. The scan completes with zero counts.
+    let dir = temp_dir("dangling-symlink");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    std::os::unix::fs::symlink(dir.join("no-such-target"), dir.join("dangling.md")).unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+}
+
+#[test]
+fn codepoint_scan_counts_a_dash_behind_a_symlink_to_a_regular_file() {
+    // A link to a regular file is content the scan has always
+    // read through, and the regular file rule keeps it. Both
+    // the file and the link are scanned, so the dash counts
+    // twice, and a fix that skipped every link would fail here.
+    let dir = temp_dir("symlink-file");
+    let target = dir.join("real.md");
+    std::fs::write(&target, "a\u{2014}b").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join("linked.md")).unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 2"));
 }
