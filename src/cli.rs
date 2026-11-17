@@ -6,8 +6,11 @@
 //! error exits at 125 and a task killed by a signal exits at
 //! 128 plus the signal number. The exit code alone does not
 //! always tell the three outcomes apart, because a task can
-//! itself exit at 125 or at a signal's code, and the report's
-//! outcome field is what separates them there.
+//! itself exit at 125 or at a signal's code. The report is
+//! what separates them there. Its outcome field tells a
+//! harness error from a task outcome, and its task_signal
+//! and task_exit_code fields tell a signal death from an
+//! exit at the same code.
 
 use std::ffi::OsString;
 use std::io::Write;
