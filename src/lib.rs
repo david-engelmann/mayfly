@@ -25,8 +25,9 @@ pub use namespace::NamespaceBackend;
 
 /// The exit code a harness error answers at on the command line.
 /// A task exit code is mirrored exactly and a task killed by a
-/// signal answers at 128 plus the signal number, so the three
-/// outcomes never share a code.
+/// signal answers at 128 plus the signal number. The three can
+/// share a code, since a task can itself exit at 125 or at a
+/// signal's code, so the report, not the code, tells them apart.
 pub const HARNESS_EXIT_CODE: i32 = 125;
 /// The widest tail of one task stream the report carries, in
 /// characters. The tail buffer's text trims its decode to the
@@ -148,16 +149,23 @@ pub struct RunSpec {
     /// the run prepares its own.
     pub root: PathBuf,
     /// The caller environment keys the scrub carries into the
-    /// sandbox. RunSpec::new defaults the list to PATH alone,
-    /// and naming any key replaces that default whole, so a
-    /// caller who wants a key beside PATH names both.
+    /// sandbox. RunSpec::new defaults the list to PATH alone.
+    /// Assigning a new list replaces that default whole, while
+    /// pushing a key onto the list keeps PATH beside it. The
+    /// command line replaces the default whole whenever any
+    /// --allow-env key is named, so a caller there who wants a
+    /// key beside PATH names both.
     pub allow_env: Vec<OsString>,
     /// Whether the task shares the host network. False, the
     /// default, gives the task a fresh network namespace
     /// holding only the loopback; true shares the host network.
     pub network: bool,
     /// Descriptors the caller hands the task across the sandbox
-    /// boundary, kept at their own numbers in the task. This is
+    /// boundary, kept at their own numbers in the task. The two
+    /// exceptions are the task's own output streams, since the
+    /// runner gives the task its capture pipes at numbers 1 and
+    /// 2, so a descriptor handed over at one of those numbers is
+    /// replaced by the pipe and never reaches the task. This is
     /// the one caller granted exception to the isolation the
     /// contract states, named in MF-1. A descriptor handed over
     /// this way is the caller's own grant to the task and stands
@@ -806,9 +814,12 @@ pub fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 /// The seconds a sandbox directory must stand untouched
-/// before the orphan sweep will judge it, so a run still
-/// being prepared by a concurrent process is never swept
-/// from under its maker.
+/// before the orphan sweep will judge it. The grace alone
+/// does not keep a run being prepared safe from the sweep.
+/// Once it has passed, the sweep spares a judged directory
+/// only while a live process names it, as the run's janitor
+/// does from its spawn, so a run whose janitor did not start
+/// can still be swept once the grace has passed.
 pub const ORPHAN_GRACE_SECONDS: f64 = 5.0;
 
 /// Remove sandbox directories under root whose runs are dead.
