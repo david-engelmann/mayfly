@@ -2250,6 +2250,15 @@ if mode == "late-done":
         emit({"event": "task_done", "exit_code": 0})
         os._exit(0)
     time.sleep(60)
+elif mode == "status-held":
+    emit({"event": "task_done", "exit_code": 0})
+    pid = os.fork()
+    if pid == 0:
+        os.close(1)
+        os.close(2)
+        time.sleep(8)
+        os._exit(0)
+    os._exit(0)
 else:
     emit({"event": "task_done", "exit_code": 0})
     note("fake-done")
@@ -2370,6 +2379,175 @@ fn an_interrupt_after_the_task_done_stamp_keeps_the_task_outcome() {
     assert_eq!(payload["task_exit_code"], 0);
     assert!(glob_run_dirs(&root_dir).is_empty());
     assert!(glob_clean_markers(&root_dir).is_empty());
+}
+
+#[test]
+fn a_held_status_pipe_costs_the_run_no_descriptor() {
+    // A fake unshare whose own process exits at once while a
+    // forked child holds the status pipe open for eight
+    // seconds, its copies of the output pipes closed first.
+    // The status drain cannot end until the child lets go, so
+    // the runner's first drain wait times out at five seconds
+    // with the drain thread still blocked on the descriptor it
+    // owns inside its File. The files this test opens across
+    // that window take the descriptor numbers the process has
+    // free. A runner that closes the drain's descriptor under
+    // its thread frees the number at the timeout, one of the
+    // files below takes it, and the File's own close when the
+    // drain ends closes that file under the test, which the
+    // closing assertions read. A runner that leaves the
+    // descriptor to its one owner closes nothing of the
+    // test's, and every sentinel stands open at the end.
+    ensure_helper();
+    let tmp = Tmp::new("status-held");
+    let fake = write_fake_unshare(&tmp.path().join("fakebin"));
+    let root_dir = tmp.path().join("root");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let backend = NamespaceBackend::with_unshare_path(Some(fake));
+    let mut task_spec = spec(py_cmd("pass"), &root_dir);
+    task_spec.allow_env = vec![os("MAYFLY_FAKE_MODE")];
+    task_spec.caller_env = vec![(os("MAYFLY_FAKE_MODE"), os("status-held"))];
+    let (tx, rx) = std::sync::mpsc::channel();
+    let began = Instant::now();
+    std::thread::spawn(move || {
+        let report = backend.run(&task_spec);
+        let _ = tx.send(report);
+    });
+    std::thread::sleep(Duration::from_millis(5500));
+    let mut sentinels: Vec<std::fs::File> = Vec::new();
+    for _ in 0..9 {
+        sentinels.push(std::fs::File::open(tmp.path()).unwrap());
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let report = rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the run did not finish behind its held status pipe");
+    let elapsed = began.elapsed();
+    assert_eq!(report.outcome, Outcome::Task);
+    assert_eq!(report.task_exit_code, Some(0));
+    // The held pipe is what makes this pin a pin. A run that
+    // finished before the drain wait could time out never
+    // stood in the window at all, and the sentinel assertions
+    // below would hold vacuously.
+    assert!(
+        elapsed >= Duration::from_secs(6),
+        "the run finished in {:?} without the held pipe engaging",
+        elapsed
+    );
+    for sentinel in &sentinels {
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::fcntl(sentinel.as_raw_fd(), libc::F_GETFD) };
+        assert!(rc != -1, "a sentinel descriptor was closed under the test");
+    }
+}
+
+#[test]
+fn a_slow_janitor_on_the_clean_path_is_reaped_by_a_detached_waiter() {
+    // A janitor kept at its cleanup past the runner's ten
+    // second stand down must still be reaped. This stages one
+    // by planting a marker the janitor cannot authenticate,
+    // so it takes its cleanup path, and a file at the sandbox
+    // path in the moment the runner's teardown removes the
+    // directory, which the janitor's removal cannot take
+    // away, so its retry loop holds it for the full thirty
+    // seconds, long past the stand down. The run still ends
+    // clean, because the teardown removed the real sandbox
+    // before the file was planted. An attempt counts only
+    // where the report stands clean and the janitor is still
+    // alive when the run returns, and up to three attempts
+    // run, because the plant races the janitor's first look
+    // and a lost race hands the janitor its five second watch
+    // instead. On a counted attempt the janitor is this
+    // process's child, and when it finally exits a reaped
+    // child leaves no entry in the process table, while a
+    // dropped one stands there as a zombie.
+    if !require_sandbox() {
+        return;
+    }
+    ensure_helper();
+    for attempt in 0..3 {
+        let tmp = Tmp::new("slow-janitor");
+        let root_dir = tmp.path().join("root");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let run_id = format!("a5a5a5a5a5{:02}", attempt);
+        let sandbox = root_dir.join(format!("run-{}", run_id));
+        let marker = root_dir.join(format!(".mayfly-clean-{}", run_id));
+        std::os::unix::fs::symlink(root_dir.join("no-such-target"), &marker).unwrap();
+        let planted = Arc::new(AtomicBool::new(false));
+        let planter = {
+            let sandbox = sandbox.clone();
+            let planted = Arc::clone(&planted);
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while Instant::now() < deadline && !sandbox.exists() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                while Instant::now() < deadline && sandbox.exists() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                if Instant::now() < deadline {
+                    let _ = std::fs::write(&sandbox, "planted in the teardown's place");
+                    planted.store(true, Ordering::SeqCst);
+                }
+            })
+        };
+        let mut backend = NamespaceBackend::new();
+        backend.run_id_override = Some(run_id);
+        let report = backend.run(&spec(py_cmd("pass"), &root_dir));
+        let _ = planter.join();
+        if report.outcome != Outcome::Task || report.sandbox_removed != Some(true) {
+            continue;
+        }
+        if !planted.load(Ordering::SeqCst) {
+            continue;
+        }
+        let janitors = pids_running_helper("__janitor", Some(sandbox.as_os_str().as_bytes()));
+        if janitors.len() != 1 {
+            continue;
+        }
+        let janitor_pid = janitors[0];
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", janitor_pid)).unwrap();
+        let fields: Vec<&str> = stat
+            .rsplit(')')
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect();
+        assert_eq!(fields[1].parse::<u32>().unwrap(), std::process::id());
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let mut zombie_since: Option<Instant> = None;
+        let mut reaped = false;
+        while Instant::now() < deadline {
+            match std::fs::read_to_string(format!("/proc/{}/stat", janitor_pid)) {
+                Ok(stat) => {
+                    let state = stat
+                        .rsplit(')')
+                        .next()
+                        .unwrap()
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("");
+                    if state == "Z" {
+                        let since = zombie_since.get_or_insert_with(Instant::now);
+                        assert!(
+                            since.elapsed() < Duration::from_secs(3),
+                            "the janitor stands as a zombie child of this process"
+                        );
+                    } else {
+                        zombie_since = None;
+                    }
+                }
+                Err(_) => {
+                    reaped = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(reaped, "the janitor's process table entry never cleared");
+        return;
+    }
+    eprintln!("no attempt staged a slow janitor, so the reaping pin did not engage");
 }
 
 // ---------- commands no exec can carry ----------
