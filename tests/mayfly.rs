@@ -27,7 +27,7 @@ use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant};
 
@@ -37,9 +37,10 @@ use mayfly::{
     RunReport, RunSpec, HARNESS_EXIT_CODE, TAIL_CHARS,
 };
 
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
+mod common;
+
+use common::{mkfifo, parse_env_output, root, Tmp};
+use common::{PHASE_NAMES, REPORT_FIELDS};
 
 fn mayfly_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mayfly"))
@@ -66,31 +67,6 @@ static PY: LazyLock<PathBuf> = LazyLock::new(|| {
 
 fn py() -> OsString {
     PY.clone().into_os_string()
-}
-
-static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-struct Tmp(PathBuf);
-
-impl Tmp {
-    fn new(tag: &str) -> Tmp {
-        let n = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir =
-            std::env::temp_dir().join(format!("mayfly-test-{}-{}-{}", std::process::id(), n, tag));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Tmp(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 
 fn os(text: &str) -> OsString {
@@ -658,12 +634,7 @@ fn the_environment_is_scrubbed_to_the_allowlist() {
         (os("MAYFLY_KEEP_ME"), os("a kept value")),
     ];
     let report = run_task_spec(&task_spec);
-    let mut seen: BTreeMap<String, String> = BTreeMap::new();
-    for line in report.stdout_tail.trim().lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            seen.insert(key.to_string(), value.to_string());
-        }
-    }
+    let seen = parse_env_output(&report.stdout_tail);
     let expected: BTreeMap<String, String> = [
         ("PATH".to_string(), "/usr/bin:/bin".to_string()),
         ("MAYFLY_KEEP_ME".to_string(), "a kept value".to_string()),
@@ -1017,12 +988,7 @@ fn an_allowlisted_coercion_key_keeps_the_caller_value() {
         (os("PYTHONCOERCECLOCALE"), os("caller-chosen")),
     ];
     let report = run_task_spec(&task_spec);
-    let mut seen: BTreeMap<String, String> = BTreeMap::new();
-    for line in report.stdout_tail.trim().lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            seen.insert(key.to_string(), value.to_string());
-        }
-    }
+    let seen = parse_env_output(&report.stdout_tail);
     assert_eq!(
         seen.get("PYTHONCOERCECLOCALE").map(|s| s.as_str()),
         Some("caller-chosen")
@@ -1181,7 +1147,7 @@ fn a_prepare_failure_report_carries_the_full_shape() {
     assert_eq!(report.proc_mounted, Some(false));
     assert!(report.sandbox_removed.is_some());
     let json = report.to_json();
-    for phase in ["prepare", "start", "task", "teardown", "total"] {
+    for phase in PHASE_NAMES {
         assert!(json.contains(&format!("\"{}\"", phase)), "{}", phase);
     }
 }
@@ -1948,12 +1914,6 @@ fn run_task_on_a_thread(
         let _ = tx.send(report);
     });
     (rx, handle)
-}
-
-fn mkfifo(path: &Path) {
-    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-    let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o666) };
-    assert_eq!(rc, 0, "mkfifo failed for {}", path.display());
 }
 
 #[test]
@@ -3570,34 +3530,14 @@ fn an_unbounded_runs_report_stands_as_landed() {
         .keys()
         .map(|key| key.as_str())
         .collect();
-    assert_eq!(
-        fields,
-        vec![
-            "backend",
-            "run_id",
-            "sandbox_dir",
-            "command",
-            "outcome",
-            "task_exit_code",
-            "task_signal",
-            "error",
-            "proc_mounted",
-            "sandbox_removed",
-            "timings_ms",
-            "stdout_tail",
-            "stderr_tail",
-        ]
-    );
+    assert_eq!(fields, REPORT_FIELDS);
     let timing_fields: Vec<&str> = payload["timings_ms"]
         .as_object()
         .unwrap()
         .keys()
         .map(|key| key.as_str())
         .collect();
-    assert_eq!(
-        timing_fields,
-        vec!["prepare", "start", "task", "teardown", "total"]
-    );
+    assert_eq!(timing_fields, PHASE_NAMES);
     assert_eq!(payload["backend"], "namespace");
     assert_eq!(
         payload["command"],
@@ -3619,7 +3559,7 @@ fn an_unbounded_runs_report_stands_as_landed() {
         payload["sandbox_dir"],
         serde_json::json!(format!("{}/run-{}", tmp.path().display(), run_id))
     );
-    for phase in ["prepare", "start", "task", "teardown", "total"] {
+    for phase in PHASE_NAMES {
         assert!(
             payload["timings_ms"][phase].is_number(),
             "the {} timing did not stand as a number",
@@ -3667,24 +3607,7 @@ fn cli_unknown_backend_reports_the_full_report_shape() {
         .keys()
         .map(|key| key.as_str())
         .collect();
-    assert_eq!(
-        fields,
-        vec![
-            "backend",
-            "run_id",
-            "sandbox_dir",
-            "command",
-            "outcome",
-            "task_exit_code",
-            "task_signal",
-            "error",
-            "proc_mounted",
-            "sandbox_removed",
-            "timings_ms",
-            "stdout_tail",
-            "stderr_tail",
-        ]
-    );
+    assert_eq!(fields, REPORT_FIELDS);
     assert_eq!(payload["backend"], "nosuch");
     assert_eq!(payload["run_id"], "");
     assert_eq!(payload["sandbox_dir"], "");
