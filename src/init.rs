@@ -115,7 +115,9 @@ pub fn real_mount(
 /// and so do a tab and a newline and a backslash itself, so a
 /// literal comparison against the real path never matches a
 /// tree bound under an escaped path. Anything that is not a
-/// backslash followed by three octal digits stands as itself.
+/// backslash followed by three octal digits that name a byte
+/// stands as itself, and an escape whose first digit stands
+/// above 3 names no byte and stands as itself with the rest.
 pub fn decode_mount_point(field: &str) -> String {
     let bytes = field.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -123,14 +125,14 @@ pub fn decode_mount_point(field: &str) -> String {
     while index < bytes.len() {
         if bytes[index] == b'\\'
             && index + 3 < bytes.len()
-            && matches!(bytes[index + 1], b'0'..=b'7')
+            && matches!(bytes[index + 1], b'0'..=b'3')
             && matches!(bytes[index + 2], b'0'..=b'7')
             && matches!(bytes[index + 3], b'0'..=b'7')
         {
-            let value = (bytes[index + 1] - b'0') * 64
-                + (bytes[index + 2] - b'0') * 8
-                + (bytes[index + 3] - b'0');
-            out.push(value);
+            let value = (bytes[index + 1] - b'0') as u32 * 64
+                + (bytes[index + 2] - b'0') as u32 * 8
+                + (bytes[index + 3] - b'0') as u32;
+            out.push(value as u8);
             index += 4;
         } else {
             out.push(bytes[index]);
@@ -524,14 +526,23 @@ fn supervise(
     // The fork is the one place the init multiplies itself, and
     // everything the child touches on its way to exec was built
     // above, before the fork, the argument strings and their
-    // pointer vector and the pipe descriptors. The child calls
-    // only async signal safe functions, close and the limit
-    // calls and the capability drop and execvp and a write of
-    // plain bytes and _exit, and
+    // pointer vector and the pipe descriptors. On its way to a
+    // successful exec the child calls only async signal safe
+    // functions, close and the limit calls and the capability
+    // drop and execvp and a write of plain bytes and _exit, and
     // allocates nothing, so no lock or buffer the parent holds
-    // can be met in a copied and locked state. The parent keeps
-    // ownership of the argument storage and drops it only after
-    // its own copies of the pipe ends are closed.
+    // can be met in a copied and locked state. A limit or
+    // capability failure is the one path that does more, in the
+    // child, formatting its report into a fresh string and
+    // reading the error text through strerror before it writes
+    // the report to the pipe and exits. That path stands on a
+    // narrower ground than the exec path. The init is single
+    // threaded at the fork, because the one other thread it
+    // runs is spawned by the parent below after the fork
+    // returns, so no allocation the child makes there can meet
+    // a lock another thread holds. The parent keeps ownership
+    // of the argument storage and drops it only after its own
+    // copies of the pipe ends are closed.
     let child = unsafe { libc::fork() };
     if child == 0 {
         // In the child. Every call here is on descriptors this

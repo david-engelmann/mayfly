@@ -2553,6 +2553,28 @@ fn the_mount_point_parse_decodes_the_kernel_octal_escapes() {
         mayfly::init::decode_mount_point(r"/digit\089"),
         r"/digit\089"
     );
+    // An escape whose first digit stands above 3 names no
+    // byte, because the widest byte is \377, and it stands as
+    // itself like anything that is not an escape. The decode
+    // once computed in u8 arithmetic, where a first digit of
+    // 4 or more overflowed the product, panicking in a checked
+    // build and wrapping in a release one, so these two cases
+    // fail against that arithmetic for the real reason. The
+    // widest escape that does name a byte still decodes, and
+    // its byte is not valid text on its own, so the lossy
+    // decode shows the replacement character for it.
+    assert_eq!(
+        mayfly::init::decode_mount_point(r"/wide\400x"),
+        r"/wide\400x"
+    );
+    assert_eq!(
+        mayfly::init::decode_mount_point(r"/wide\777x"),
+        r"/wide\777x"
+    );
+    assert_eq!(
+        mayfly::init::decode_mount_point(r"/edge\377x"),
+        "/edge\u{fffd}x"
+    );
 }
 
 #[test]
