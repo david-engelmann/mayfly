@@ -405,16 +405,7 @@ impl NamespaceBackend {
         // line refuses the same values at parse time in its own
         // class and never reaches this answer.
         if let Some(error) = bound_breach(spec) {
-            let mut report = RunReport::new(
-                self.name(),
-                "",
-                "",
-                spec.command.clone(),
-                Outcome::HarnessError,
-            );
-            report.error = Some(error);
-            report.proc_mounted = Some(false);
-            report.sandbox_removed = Some(true);
+            let mut report = RunReport::early_refusal(self.name(), spec.command.clone(), error);
             report.timings_ms = Timings {
                 total: Some(ms_since(wall)),
                 ..Timings::default()
@@ -435,16 +426,11 @@ impl NamespaceBackend {
         let (run_id, token) = match drawn {
             Ok(pair) => pair,
             Err(err) => {
-                let mut report = RunReport::new(
+                let mut report = RunReport::early_refusal(
                     self.name(),
-                    "",
-                    "",
                     spec.command.clone(),
-                    Outcome::HarnessError,
+                    format!("prepare failed, {}", py_os_error(&err)),
                 );
-                report.error = Some(format!("prepare failed, {}", py_os_error(&err)));
-                report.proc_mounted = Some(false);
-                report.sandbox_removed = Some(true);
                 timings.total = Some(ms_since(wall));
                 report.timings_ms = timings;
                 return report;
