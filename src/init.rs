@@ -690,6 +690,25 @@ fn opt_value<'a>(opts: &'a [OsString], name: &str) -> Option<&'a OsString> {
         .and_then(|index| opts.get(index + 1))
 }
 
+/// Whether the caller of one of the hidden entry points
+/// must refuse to run for want of the internal run token,
+/// printing the refusal in the entry point's own name where
+/// it must. The check is the token environment value read
+/// against the token shape, and the two entry points share
+/// this one statement of it.
+fn token_refusal(subcommand: &str) -> bool {
+    match std::env::var(crate::INTERNAL_TOKEN_ENV) {
+        Ok(value) if crate::token_shape_ok(&value) => false,
+        _ => {
+            eprintln!(
+                "mayfly {} refuses to run without the internal run token",
+                subcommand
+            );
+            true
+        }
+    }
+}
+
 /// The init entry point, reached through the hidden __init
 /// subcommand of the mayfly binary with the argv the unshare
 /// call built.
@@ -702,8 +721,9 @@ fn opt_value<'a>(opts: &'a [OsString], name: &str) -> Option<&'a OsString> {
 /// the same guard against accident the drive carries.
 pub fn init_main(args: &[OsString]) -> i32 {
     // The token check stands first, before the death signal
-    // is armed and before anything is attempted, in the shape
-    // the assembly drive's check takes. The init performs the
+    // is armed and before anything is attempted, through the
+    // one check both hidden entry points share. The init
+    // performs the
     // assembly and then sets the hostname, pivots the root,
     // and supervises the command, strictly more than the
     // drive performs on a direct invocation, and the runner's
@@ -713,12 +733,8 @@ pub fn init_main(args: &[OsString]) -> i32 {
     // can arm, assemble, or supervise anything, and the
     // refusal leaves nothing behind, no armed signal, no
     // status event, and nothing created.
-    match std::env::var(crate::INTERNAL_TOKEN_ENV) {
-        Ok(value) if crate::token_shape_ok(&value) => {}
-        _ => {
-            eprintln!("mayfly __init refuses to run without the internal run token");
-            return 1;
-        }
+    if token_refusal("__init") {
+        return 1;
     }
     // Arm the parent death signal before the assembly, so an
     // init whose supervisor dies at any later point in the
@@ -829,12 +845,8 @@ pub fn init_main(args: &[OsString]) -> i32 {
 /// assembly needs, so the gate is a guard against accident
 /// and not a boundary, and it is checked before any mount.
 pub fn assemble_root_main(args: &[OsString]) -> i32 {
-    match std::env::var(crate::INTERNAL_TOKEN_ENV) {
-        Ok(value) if crate::token_shape_ok(&value) => {}
-        _ => {
-            eprintln!("mayfly __assemble-root refuses to run without the internal run token");
-            return 1;
-        }
+    if token_refusal("__assemble-root") {
+        return 1;
     }
     let rootfs = match opt_value(args, "--rootfs") {
         Some(value) => PathBuf::from(value),
