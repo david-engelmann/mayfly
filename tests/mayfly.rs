@@ -3564,6 +3564,62 @@ fn cli_refuses_the_widest_processor_ceiling_at_2() {
     assert_eq!(dir_names(tmp.path()), Vec::<String>::new());
 }
 
+
+#[test]
+fn cli_refuses_a_bound_value_under_its_floor_at_2() {
+    // The library floor refusals are pinned word for word
+    // through the backend, and the command line's missing
+    // value, whole number, past range, and ceiling refusals
+    // are pinned in their own words. The floor refusal is
+    // the one arm no pin drove: a parser that lost its floor
+    // check would hand the value to the backend, which
+    // refuses it as a harness error at 125 with a report
+    // printed, where this arm refuses at 2 in the bound's
+    // own words with no report and nothing prepared.
+    ensure_helper();
+    let tmp = Tmp::new("bound-cli-floor");
+    let cases: [(&str, &str, &str); 4] = [
+        (
+            "--timeout",
+            "0",
+            "mayfly run needs --timeout of at least 1 second\n",
+        ),
+        (
+            "--max-cpu",
+            "0",
+            "mayfly run needs --max-cpu of at least 1 second\n",
+        ),
+        (
+            "--max-memory",
+            "0",
+            "mayfly run needs --max-memory of at least 16777216 bytes\n",
+        ),
+        (
+            "--max-memory",
+            "16777215",
+            "mayfly run needs --max-memory of at least 16777216 bytes\n",
+        ),
+    ];
+    for (name, value, expected) in cases {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let mut args = vec![
+            os("run"),
+            os("--root"),
+            tmp.path().as_os_str().to_os_string(),
+            os(name),
+            os(value),
+            os("--"),
+        ];
+        args.extend(py_cmd("pass"));
+        let code = cli_main(&args, &mut out, &mut err);
+        assert_eq!(code, 2, "{}", name);
+        assert_eq!(String::from_utf8(err).unwrap(), expected, "{}", name);
+        assert!(out.is_empty(), "{}", name);
+    }
+    assert_eq!(dir_names(tmp.path()), Vec::<String>::new());
+}
+
 #[test]
 fn the_bounds_never_reach_the_task_environment() {
     if !require_sandbox() {
