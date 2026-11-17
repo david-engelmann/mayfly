@@ -533,9 +533,13 @@ impl NamespaceBackend {
             let mut child = janitor.child;
             if clean {
                 let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut reaped = false;
                 loop {
                     match child.try_wait() {
-                        Ok(Some(_)) => break,
+                        Ok(Some(_)) => {
+                            reaped = true;
+                            break;
+                        }
                         Ok(None) => {
                             if std::time::Instant::now() >= deadline {
                                 break;
@@ -544,6 +548,19 @@ impl NamespaceBackend {
                         }
                         Err(_) => break,
                     }
+                }
+                if !reaped {
+                    // The janitor is still at its work past the
+                    // stand down, slow at a removal a dying init
+                    // keeps recreating, or the wait above ended
+                    // on an error. It is reaped the way the not
+                    // clean path below reaps it, by a detached
+                    // waiter, so a finished run never leaves the
+                    // janitor behind as a zombie in a caller that
+                    // lives on past the run.
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
                 }
             } else {
                 // The sandbox still stands, so the janitor has
@@ -771,7 +788,6 @@ impl NamespaceBackend {
         let _ = out_done_rx.recv_timeout(Duration::from_secs(5));
         let _ = err_done_rx.recv_timeout(Duration::from_secs(5));
         if status_done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-            close_fd(status_r);
             let _ = status_done_rx.recv_timeout(Duration::from_secs(5));
         }
         ctx.report.stdout_tail = out_tail.text();
