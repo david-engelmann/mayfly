@@ -404,12 +404,8 @@ fn status(status_fd: i32, event: serde_json::Value) {
     }
 }
 
-fn status_event(status_fd: i32, fields: serde_json::Value) {
-    status(status_fd, fields);
-}
-
 fn fail(status_fd: i32, detail: &str) -> i32 {
-    status_event(
+    status(
         status_fd,
         serde_json::json!({"event": "start_error", "detail": detail}),
     );
@@ -619,7 +615,7 @@ fn supervise(
         let report = String::from_utf8_lossy(&report_buf[..read_count as usize]).into_owned();
         return fail(status_fd, &format!("could not start the task, {}", report));
     }
-    status_event(status_fd, serde_json::json!({"event": "started"}));
+    status(status_fd, serde_json::json!({"event": "started"}));
     let mut exit_code: Option<i32> = None;
     let mut signal_no: Option<i32> = None;
     loop {
@@ -656,7 +652,7 @@ fn supervise(
     }
     child_slot.store(0, Ordering::SeqCst);
     if let Some(signal) = signal_no {
-        status_event(
+        status(
             status_fd,
             serde_json::json!({"event": "task_done", "signal": signal}),
         );
@@ -668,7 +664,7 @@ fn supervise(
             "the task vanished before its wait status was read",
         ),
         Some(code) => {
-            status_event(
+            status(
                 status_fd,
                 serde_json::json!({"event": "task_done", "exit_code": code}),
             );
@@ -785,7 +781,7 @@ pub fn init_main(args: &[OsString]) -> i32 {
             return fail(status_fd, &format!("the prepared root failed, {}", detail));
         }
     };
-    status_event(
+    status(
         status_fd,
         serde_json::json!({"event": "ready", "proc_mounted": proc_mounted}),
     );
