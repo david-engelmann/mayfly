@@ -112,8 +112,12 @@ fn scan(root: &Path, out: &mut dyn Write) -> Result<(usize, usize), ScanError> {
         let file_em = text.matches(EM_DASH).count();
         let file_en = text.matches(EN_DASH).count();
         if file_em > 0 || file_en > 0 {
-            writeln!(out, "{}: em dash {file_em}, en dash {file_en}", path.display())
-                .map_err(|err| ScanError(format!("cannot write the scan output, {err}")))?;
+            writeln!(
+                out,
+                "{}: em dash {file_em}, en dash {file_en}",
+                path.display()
+            )
+            .map_err(|err| ScanError(format!("cannot write the scan output, {err}")))?;
         }
         em_count += file_em;
         en_count += file_en;
