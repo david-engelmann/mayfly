@@ -183,6 +183,25 @@ fn ci_runs_the_local_gate_commands() {
     assert!(commands.iter().any(|c| c == CLIPPY_COMMAND));
 }
 
+fn toolchain_pins_all_full(text: &str) -> bool {
+    let mut seen = false;
+    for line in text.lines() {
+        if let Some((_, pin)) = line.split_once("dtolnay/rust-toolchain@") {
+            seen = true;
+            let pin = pin.trim();
+            if pin.len() != 40 {
+                return false;
+            }
+            for b in pin.bytes() {
+                if !b.is_ascii_digit() && !(b'a'..=b'f').contains(&b) {
+                    return false;
+                }
+            }
+        }
+    }
+    seen
+}
+
 #[test]
 fn ci_carries_the_fleet_credential_hygiene() {
     let text = read(".github/workflows/ci.yml");
@@ -195,19 +214,29 @@ fn ci_carries_the_fleet_credential_hygiene() {
     assert!(text.contains("contents: read"));
     assert!(text.contains("persist-credentials: false"));
     assert!(!text.contains("rust-toolchain@master"));
-    let toolchain_line = text
-        .lines()
-        .find(|line| line.contains("dtolnay/rust-toolchain@"))
-        .expect("the workflow carries no toolchain step");
-    let pin = toolchain_line
-        .split("dtolnay/rust-toolchain@")
-        .nth(1)
-        .unwrap()
-        .trim();
-    assert_eq!(pin.len(), 40, "{}", toolchain_line);
-    assert!(pin
-        .bytes()
-        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+    assert!(
+        toolchain_pins_all_full(&text),
+        "every toolchain step must carry a full commit SHA pin"
+    );
+}
+
+#[test]
+fn ci_toolchain_judgement_covers_every_toolchain_line() {
+    // The hygiene pin judges the workflow's toolchain lines
+    // through toolchain_pins_all_full. A judgement that read
+    // only the first line would pass the second text below,
+    // whose second toolchain step rides a moving branch name
+    // the file wide master refusal does not name.
+    let full = "0123456789abcdef0123456789abcdef01234567";
+    let one = format!("      - uses: dtolnay/rust-toolchain@{full}\n");
+    assert!(toolchain_pins_all_full(&one));
+    let two_full = format!("{one}      - uses: dtolnay/rust-toolchain@{full}\n");
+    assert!(toolchain_pins_all_full(&two_full));
+    let second_moving = format!("{one}      - uses: dtolnay/rust-toolchain@main\n");
+    assert!(!toolchain_pins_all_full(&second_moving));
+    let second_short = format!("{one}      - uses: dtolnay/rust-toolchain@0123456789\n");
+    assert!(!toolchain_pins_all_full(&second_short));
+    assert!(!toolchain_pins_all_full("name: CI\n"));
 }
 
 #[test]
