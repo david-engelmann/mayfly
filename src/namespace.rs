@@ -43,6 +43,10 @@ use crate::{
 pub type ProvenanceWriter = dyn Fn(&Path, &str) -> io::Result<()> + Send + Sync;
 
 pub struct NamespaceBackend {
+    /// The unshare program the box is built with. new()
+    /// resolves it through the path search, and
+    /// with_unshare_path overrides that resolution with the
+    /// path it is handed.
     pub unshare_path: Option<PathBuf>,
     /// A fixed run id in place of a fresh random one. Library
     /// callers leave this empty. Tests set it to plant a run at a
