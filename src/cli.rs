@@ -4,8 +4,10 @@
 //! command in a fresh sandbox under that root, prints the run
 //! report as json, and exits with the task exit code. A harness
 //! error exits at 125 and a task killed by a signal exits at
-//! 128 plus the signal number, so the three outcomes are never
-//! confused with each other.
+//! 128 plus the signal number. The exit code alone does not
+//! always tell the three outcomes apart, because a task can
+//! itself exit at 125 or at a signal's code, and the report's
+//! outcome field is what separates them there.
 
 use std::ffi::OsString;
 use std::io::Write;
