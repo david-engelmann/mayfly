@@ -2285,7 +2285,10 @@ fn one_sweep_answers_each_candidate_from_the_one_table() {
                 "424242",
                 FakeCmdline::Bytes(referenced.as_os_str().as_bytes().to_vec()),
             ),
-            ("424243", FakeCmdline::Bytes(b"mayfly-test-unrelated".to_vec())),
+            (
+                "424243",
+                FakeCmdline::Bytes(b"mayfly-test-unrelated".to_vec()),
+            ),
         ],
     );
     sweep_orphans_in(&root_dir, &fake);
