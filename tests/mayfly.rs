@@ -2722,6 +2722,50 @@ fn the_assemble_root_drive_refuses_without_the_internal_token() {
 }
 
 #[test]
+fn the_init_drive_refuses_without_the_internal_token() {
+    // The hidden init performs the assembly the drive
+    // performs and then sets the hostname, pivots the root,
+    // and supervises the command, strictly more than the
+    // drive does on a direct invocation, and it carries the
+    // same token refusal the drive carries, checked before
+    // anything is armed or attempted. Driven directly here,
+    // on the host and outside any namespace, with the token
+    // key removed from the environment the child inherits
+    // and the status descriptor standing at the child's own
+    // error stream, so a start that got past the refusal
+    // would write its failure event where this pin reads.
+    // Against the code before the refusal the drive answers
+    // the assembly's failure at the harness exit in the
+    // prepared root words with no refusal on its error
+    // stream, and the pin fails on the exit code, the words,
+    // and the event alike.
+    let tmp = Tmp::new("init-refusal");
+    let sandbox = tmp.path().join("run-refuse000002");
+    let rootfs = sandbox.join("rootfs");
+    let output = Command::new(mayfly_bin())
+        .arg("__init")
+        .arg("--rootfs")
+        .arg(rootfs.as_os_str())
+        .arg("--status-fd")
+        .arg("2")
+        .arg("--")
+        .arg("/bin/true")
+        .env_remove(mayfly::INTERNAL_TOKEN_ENV)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refuses to run without the internal run token"),
+        "{}",
+        stderr
+    );
+    assert!(!stderr.contains("the prepared root failed"), "{}", stderr);
+    assert!(!rootfs.exists());
+    assert!(!sandbox.exists());
+}
+
+#[test]
 fn the_mount_point_parse_decodes_the_kernel_octal_escapes() {
     // The mounts table escapes a space in a mount point as a
     // backslash followed by three octal digits, and likewise

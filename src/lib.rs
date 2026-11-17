@@ -536,9 +536,10 @@ pub const PROVENANCE_READ_LIMIT: usize = 4096;
 /// the environment the supervisor builds is scrubbed to the
 /// allowlist and the init removes this key from its own
 /// environment before it supervises the task. The hidden
-/// assembly entry point refuses to run without a value of the
-/// token shape under this key, so it cannot be invoked directly
-/// on a host by accident and perform its mounts there.
+/// assembly entry point and the init refuse to run without
+/// a value of the token shape under this key, so neither can
+/// be invoked directly on a host by accident and perform its
+/// mounts there.
 pub const INTERNAL_TOKEN_ENV: &str = "MAYFLY_INTERNAL_TOKEN";
 
 /// Whether a value has the shape of a per run token, thirty two

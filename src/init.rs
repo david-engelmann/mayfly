@@ -693,8 +693,34 @@ fn opt_value<'a>(opts: &'a [OsString], name: &str) -> Option<&'a OsString> {
 /// The init entry point, reached through the hidden __init
 /// subcommand of the mayfly binary with the argv the unshare
 /// call built.
+///
+/// Like the assembly drive it refuses to run unless the
+/// caller presents the internal run token in its environment,
+/// checked before anything is armed or attempted, because a
+/// direct invocation assembles the root and supervises the
+/// command in the caller's own namespaces, and the gate is
+/// the same guard against accident the drive carries.
 pub fn init_main(args: &[OsString]) -> i32 {
-    // Arm the parent death signal before anything else, so an
+    // The token check stands first, before the death signal
+    // is armed and before anything is attempted, in the shape
+    // the assembly drive's check takes. The init performs the
+    // assembly and then sets the hostname, pivots the root,
+    // and supervises the command, strictly more than the
+    // drive performs on a direct invocation, and the runner's
+    // own account of the token names the hidden entry points
+    // in the plural as the children it tells from a direct
+    // caller. A direct caller is therefore refused before it
+    // can arm, assemble, or supervise anything, and the
+    // refusal leaves nothing behind, no armed signal, no
+    // status event, and nothing created.
+    match std::env::var(crate::INTERNAL_TOKEN_ENV) {
+        Ok(value) if crate::token_shape_ok(&value) => {}
+        _ => {
+            eprintln!("mayfly __init refuses to run without the internal run token");
+            return 1;
+        }
+    }
+    // Arm the parent death signal before the assembly, so an
     // init whose supervisor dies at any later point in the
     // assembly or the supervision dies with it. A failure to
     // arm is an init failure reported like any other, never a
