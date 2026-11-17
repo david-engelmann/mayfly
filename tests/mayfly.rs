@@ -3607,3 +3607,59 @@ fn an_unbounded_runs_report_stands_as_landed() {
         );
     }
 }
+
+#[test]
+fn cli_unknown_backend_reports_the_full_report_shape() {
+    let tmp = Tmp::new("cli-unknown-backend");
+    let mut args = vec![
+        os("run"),
+        os("--root"),
+        tmp.path().as_os_str().to_os_string(),
+        os("--backend"),
+        os("nosuch"),
+        os("--"),
+    ];
+    args.extend(cmd(&["/bin/echo", "landed"]));
+    let result = run_cli(&args, &[]);
+    assert_eq!(result.code, 125);
+    let payload: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    let fields: Vec<&str> = payload
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|key| key.as_str())
+        .collect();
+    assert_eq!(
+        fields,
+        vec![
+            "backend",
+            "run_id",
+            "sandbox_dir",
+            "command",
+            "outcome",
+            "task_exit_code",
+            "task_signal",
+            "error",
+            "proc_mounted",
+            "sandbox_removed",
+            "timings_ms",
+            "stdout_tail",
+            "stderr_tail",
+        ]
+    );
+    assert_eq!(payload["backend"], "nosuch");
+    assert_eq!(payload["run_id"], "");
+    assert_eq!(payload["sandbox_dir"], "");
+    assert_eq!(
+        payload["command"],
+        serde_json::json!(["/bin/echo", "landed"])
+    );
+    assert_eq!(payload["outcome"], "harness_error");
+    assert_eq!(payload["task_exit_code"], serde_json::Value::Null);
+    assert_eq!(payload["task_signal"], serde_json::Value::Null);
+    assert_eq!(payload["error"], "unknown backend, nosuch");
+    assert_eq!(payload["proc_mounted"], false);
+    assert_eq!(payload["sandbox_removed"], true);
+    assert_eq!(payload["stdout_tail"], "");
+    assert_eq!(payload["stderr_tail"], "");
+}

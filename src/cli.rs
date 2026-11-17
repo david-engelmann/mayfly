@@ -12,8 +12,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::{
-    dump_pretty, get_backend, JsonValue, Outcome, RunSpec, HARNESS_EXIT_CODE,
-    MAX_CPU_CEILING_SECONDS, MAX_CPU_FLOOR_SECONDS, MAX_MEMORY_FLOOR_BYTES, TIMEOUT_FLOOR_SECONDS,
+    get_backend, Outcome, RunReport, RunSpec, HARNESS_EXIT_CODE, MAX_CPU_CEILING_SECONDS,
+    MAX_CPU_FLOOR_SECONDS, MAX_MEMORY_FLOOR_BYTES, TIMEOUT_FLOOR_SECONDS,
 };
 
 const USAGE: &str = "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--net] [--timeout SECONDS] [--max-cpu SECONDS] [--max-memory BYTES] -- COMMAND...";
@@ -220,25 +220,12 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
     let report = match get_backend(&backend) {
         Ok(backend_impl) => backend_impl.run(&spec),
         Err(exc) => {
-            let payload = JsonValue::Object(vec![
-                ("backend".to_string(), JsonValue::Str(backend.clone())),
-                (
-                    "command".to_string(),
-                    JsonValue::List(
-                        command
-                            .iter()
-                            .map(|arg| JsonValue::Str(arg.to_string_lossy().into_owned()))
-                            .collect(),
-                    ),
-                ),
-                (
-                    "outcome".to_string(),
-                    JsonValue::Str("harness_error".to_string()),
-                ),
-                ("error".to_string(), JsonValue::Str(exc.0.clone())),
-            ]);
-            let _ = writeln!(out, "{}", dump_pretty(&payload));
-            return HARNESS_EXIT_CODE;
+            let mut report =
+                RunReport::new(&backend, "", "", command.clone(), Outcome::HarnessError);
+            report.error = Some(exc.0);
+            report.proc_mounted = Some(false);
+            report.sandbox_removed = Some(true);
+            report
         }
     };
     let _ = writeln!(out, "{}", report.to_json());
