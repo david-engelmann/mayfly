@@ -2567,7 +2567,7 @@ fn a_slow_janitor_on_the_clean_path_is_reaped_by_a_detached_waiter() {
         assert!(reaped, "the janitor's process table entry never cleared");
         return;
     }
-    eprintln!("no attempt staged a slow janitor, so the reaping pin did not engage");
+    panic!("no attempt staged a slow janitor, so the reaping pin did not engage");
 }
 
 // ---------- commands no exec can carry ----------
