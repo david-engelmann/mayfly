@@ -640,12 +640,37 @@ pub fn write_provenance(sandbox_dir: &Path, run_id: &str) -> io::Result<()> {
 /// over. A read refused for any other reason also makes the
 /// answer None, because the one entry withheld may be the one
 /// that names the path.
-pub fn pids_referencing_in(proc_dir: &Path, path: &Path) -> Option<Vec<u32>> {
-    let needle = path.as_os_str().as_bytes();
-    let mut found = Vec::new();
+/// One reading of a process table: the command line of every
+/// process in it that could be read, by pid. The orphan sweep
+/// reads the table once and tests every candidate against this
+/// one reading, so a sweep over k stale candidates pays one
+/// table scan instead of k. The reading is None in exactly the
+/// shapes where a scan's answer is unknown: a table that
+/// cannot be listed, a listing that fails part way, a command
+/// line read refused for any reason but a process vanishing
+/// between the listing and the read, and a table in which not
+/// one command line could be read at all.
+struct ProcTable {
+    lines: Vec<(u32, Vec<u8>)>,
+}
+
+impl ProcTable {
+    /// The pids in this reading whose command line names the
+    /// given path.
+    fn referencing(&self, path: &Path) -> Vec<u32> {
+        let needle = path.as_os_str().as_bytes();
+        self.lines
+            .iter()
+            .filter(|(_, cmdline)| contains_subslice(cmdline, needle))
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+}
+
+fn read_proc_table(proc_dir: &Path) -> Option<ProcTable> {
+    let mut lines: Vec<(u32, Vec<u8>)> = Vec::new();
     let entries = std::fs::read_dir(proc_dir).ok()?;
     let own = std::process::id();
-    let mut reads = 0usize;
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
@@ -665,20 +690,19 @@ pub fn pids_referencing_in(proc_dir: &Path, path: &Path) -> Option<Vec<u32>> {
         }
         let cmdline_path = entry.path().join("cmdline");
         match std::fs::read(&cmdline_path) {
-            Ok(cmdline) => {
-                reads += 1;
-                if contains_subslice(&cmdline, needle) {
-                    found.push(pid);
-                }
-            }
+            Ok(cmdline) => lines.push((pid, cmdline)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(_) => return None,
         }
     }
-    if reads == 0 {
+    if lines.is_empty() {
         return None;
     }
-    Some(found)
+    Some(ProcTable { lines })
+}
+
+pub fn pids_referencing_in(proc_dir: &Path, path: &Path) -> Option<Vec<u32>> {
+    read_proc_table(proc_dir).map(|table| table.referencing(path))
 }
 
 pub fn pids_referencing(path: &Path) -> Option<Vec<u32>> {
@@ -716,7 +740,10 @@ pub const ORPHAN_GRACE_SECONDS: f64 = 5.0;
 /// planted at a run directory position is neither read through
 /// nor removed, because the sweep never decides from data
 /// outside the run root. Where the process table cannot be listed, liveness
-/// is unknown and nothing is swept. A clean marker whose run
+/// is unknown and nothing is swept. The liveness of every
+/// candidate in one sweep is judged against a single reading
+/// of the process table, taken when the first candidate is
+/// judged. A clean marker whose run
 /// directory is already gone is swept on the same terms. A
 /// sweep failure never breaks the run that triggered it.
 pub fn sweep_orphans_in(root: &Path, proc_dir: &Path) {
@@ -728,12 +755,23 @@ pub fn sweep_orphans_in(root: &Path, proc_dir: &Path) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
+    // The table is read once, when the first candidate reaches
+    // the liveness check, and every candidate in the sweep is
+    // judged against that one reading. A sweep whose root
+    // holds no stale candidate never reads the table at all.
+    let mut table: Option<Option<ProcTable>> = None;
     for entry in entries {
-        sweep_one(root, proc_dir, &entry, now_secs);
+        sweep_one(root, proc_dir, &entry, now_secs, &mut table);
     }
 }
 
-fn sweep_one(root: &Path, proc_dir: &Path, entry: &Path, now_secs: f64) {
+fn sweep_one(
+    root: &Path,
+    proc_dir: &Path,
+    entry: &Path,
+    now_secs: f64,
+    table: &mut Option<Option<ProcTable>>,
+) {
     let name = match entry.file_name().and_then(|n| n.to_str()) {
         Some(n) => n.to_string(),
         None => return,
@@ -759,7 +797,8 @@ fn sweep_one(root: &Path, proc_dir: &Path, entry: &Path, now_secs: f64) {
         if read_provenance(entry).as_deref() != Some(run_id) {
             return;
         }
-        match pids_referencing_in(proc_dir, entry) {
+        let snapshot = table.get_or_insert_with(|| read_proc_table(proc_dir));
+        match snapshot.as_ref().map(|t| t.referencing(entry)) {
             None => return,
             Some(pids) if !pids.is_empty() => return,
             _ => {}
