@@ -3556,6 +3556,50 @@ fn cli_rejects_a_bound_value_that_is_not_a_whole_number() {
 }
 
 #[test]
+fn cli_refuses_a_bound_value_past_the_widest_number_in_range_words() {
+    // A value written in digits alone is a whole number at any
+    // width, and a digit string past the widest number the
+    // parser carries fails the parse on its width alone. The
+    // whole number refusal would state a falsehood for it, so
+    // it refuses in range words instead: the ceiling words of
+    // its bound where the bound carries a ceiling, and the
+    // widest number words where it carries none. The refusal
+    // stands at exit 2, with nothing on standard output and
+    // nothing prepared in the root.
+    let tmp = Tmp::new("bound-cli-past-range");
+    let cases: [(&str, &str); 3] = [
+        (
+            "--timeout",
+            "mayfly run needs a value after --timeout no larger than 18446744073709551615\n",
+        ),
+        (
+            "--max-cpu",
+            "mayfly run needs --max-cpu of at most 18446744073709551614 seconds\n",
+        ),
+        (
+            "--max-memory",
+            "mayfly run needs a value after --max-memory no larger than 18446744073709551615\n",
+        ),
+    ];
+    for (name, expected) in cases {
+        let mut args = vec![
+            os("run"),
+            os("--root"),
+            tmp.path().as_os_str().to_os_string(),
+            os(name),
+            os("99999999999999999999999999"),
+            os("--"),
+        ];
+        args.extend(py_cmd("pass"));
+        let result = run_cli(&args, &[]);
+        assert_eq!(result.code, 2, "{}", name);
+        assert_eq!(result.stderr, expected, "{}", name);
+        assert!(result.stdout.is_empty(), "{}", name);
+    }
+    assert_eq!(dir_names(tmp.path()), Vec::<String>::new());
+}
+
+#[test]
 fn an_unbounded_runs_report_stands_as_landed() {
     if !require_sandbox() {
         return;
