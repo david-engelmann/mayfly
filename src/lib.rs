@@ -26,7 +26,6 @@ pub use namespace::NamespaceBackend;
 pub const HARNESS_EXIT_CODE: i32 = 125;
 pub const TAIL_CHARS: usize = 4000;
 pub const TAIL_BYTES: usize = 1 << 16;
-pub const PHASES: [&str; 4] = ["prepare", "start", "task", "teardown"];
 
 /// The lowest value each bound of MF-13 accepts. A value under
 /// its floor is refused as a caller error before any sandbox is
