@@ -102,11 +102,7 @@ fn bound_value(
 /// refusal; the string options read through here, and the
 /// refusal is the one sentence every valued option answers
 /// with where its value is missing or option shaped.
-fn string_value(
-    value: Option<OsString>,
-    name: &str,
-    err: &mut dyn Write,
-) -> Result<OsString, i32> {
+fn string_value(value: Option<OsString>, name: &str, err: &mut dyn Write) -> Result<OsString, i32> {
     match value {
         Some(value) => Ok(value),
         None => {
