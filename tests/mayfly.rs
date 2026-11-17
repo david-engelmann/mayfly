@@ -2235,6 +2235,67 @@ fn a_vanished_process_does_not_make_liveness_unknown() {
     let _ = sleeper.wait();
 }
 
+#[test]
+fn a_refused_cmdline_keeps_every_candidate_of_the_sweep() {
+    // The poisoned table rule is a property of the whole
+    // sweep, not of one candidate: where one command line
+    // read is refused, liveness is unknown, and no candidate
+    // of the sweep is removed on the strength of the readable
+    // remainder. A form that read the table once and treated
+    // the refused read as an empty table would remove the
+    // second candidate here on an answer the table never
+    // gave.
+    let tmp = Tmp::new("sweep-poison-two");
+    let root_dir = tmp.path().join("root");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let first = plant_sweepable(&root_dir, "eeee00000008");
+    let second = plant_sweepable(&root_dir, "eeee00000009");
+    let fake = fake_proc_table(
+        &tmp.path().join("fakeproc-poison-two"),
+        &[
+            (
+                "424242",
+                FakeCmdline::Bytes(first.as_os_str().as_bytes().to_vec()),
+            ),
+            ("424243", FakeCmdline::Directory),
+        ],
+    );
+    sweep_orphans_in(&root_dir, &fake);
+    assert!(first.exists());
+    assert!(second.exists());
+}
+
+#[test]
+fn one_sweep_answers_each_candidate_from_the_one_table() {
+    // Two candidates stand under one table that names only
+    // the first. The referenced one stands and the other is
+    // swept, so the sweep's answers are per candidate even
+    // where the table behind them is read once: a form that
+    // answered every candidate with the first candidate's
+    // answer would leave the second standing here.
+    let tmp = Tmp::new("sweep-two-candidates");
+    let root_dir = tmp.path().join("root");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let referenced = plant_sweepable(&root_dir, "eeee0000000a");
+    let unreferenced = plant_sweepable(&root_dir, "eeee0000000b");
+    let fake = fake_proc_table(
+        &tmp.path().join("fakeproc-two"),
+        &[
+            (
+                "424242",
+                FakeCmdline::Bytes(referenced.as_os_str().as_bytes().to_vec()),
+            ),
+            (
+                "424243",
+                FakeCmdline::Bytes(b"mayfly-test-unrelated".to_vec()),
+            ),
+        ],
+    );
+    sweep_orphans_in(&root_dir, &fake);
+    assert!(referenced.exists());
+    assert!(!unreferenced.exists());
+}
+
 // ---------- the fake unshare interrupt protocol ----------
 
 const FAKE_UNSHARE: &str = r#"#!/usr/bin/env python3
