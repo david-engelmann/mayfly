@@ -18,7 +18,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 pub use namespace::NamespaceBackend;
@@ -807,13 +807,20 @@ pub struct SignalGuard {
 static SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static SIGNAL_FIRST: AtomicI32 = AtomicI32::new(0);
 static SIGNAL_FIRST_TIME: AtomicU64 = AtomicU64::new(0);
+static SIGNAL_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn record_signal(signum: i32) {
-    // The snapshot is stored before the count moves, and the
-    // count store releases it, so a reader that acquires a
-    // nonzero count always sees the first signal and its stamp
-    // whole, and never a count standing over an unstamped zero.
-    if SIGNAL_COUNT.load(Ordering::SeqCst) == 0 {
+    // The snapshot is claimed by a swap on a dedicated flag, so
+    // exactly one handler writes the signum and its stamp, and
+    // the count store releases the pair, so a reader that
+    // acquires a nonzero count always sees the first signal and
+    // its stamp whole, written by the one handler that claimed
+    // them, and never a count standing over an unstamped zero.
+    // Two signals handled on different threads at the same
+    // moment cannot interleave their stores, because only the
+    // handler whose swap takes the flag from false to true
+    // writes the pair at all.
+    if !SIGNAL_CLAIMED.swap(true, Ordering::SeqCst) {
         SIGNAL_FIRST.store(signum, Ordering::Release);
         SIGNAL_FIRST_TIME.store(now().to_bits(), Ordering::Release);
     }
@@ -837,6 +844,7 @@ impl SignalGuard {
         if !is_main_thread() {
             return guard;
         }
+        SIGNAL_CLAIMED.store(false, Ordering::SeqCst);
         SIGNAL_COUNT.store(0, Ordering::SeqCst);
         SIGNAL_FIRST.store(0, Ordering::SeqCst);
         SIGNAL_FIRST_TIME.store(0, Ordering::SeqCst);
