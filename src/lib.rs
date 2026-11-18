@@ -299,18 +299,50 @@ impl Outcome {
 /// The record of one run, printed by the command line as json.
 #[derive(Debug, Clone)]
 pub struct RunReport {
+    /// The backend that ran the task, by its registered name.
+    /// On the command line's unknown backend refusal, the name
+    /// the caller asked for, which no backend registered.
     pub backend: String,
+    /// The run's id, drawn for the run. Empty on an early
+    /// refusal.
     pub run_id: String,
+    /// The sandbox directory the run prepared under the root.
+    /// Empty on an early refusal.
     pub sandbox_dir: String,
+    /// The command the run carried, as its caller named it.
     pub command: Vec<OsString>,
+    /// The run's outcome, a task outcome or a harness error.
     pub outcome: Outcome,
+    /// The task's exit code, where the task ended by exiting.
+    /// On a task outcome exactly one of this field and
+    /// task_signal stands.
     pub task_exit_code: Option<i32>,
+    /// The signal that killed the task, where the task ended
+    /// by a signal. On a task outcome exactly one of this
+    /// field and task_exit_code stands.
     pub task_signal: Option<i32>,
+    /// The harness error's text. None on a task outcome, and
+    /// None too on a harness error the run could not name, as
+    /// where the wait on the sandbox child itself failed.
     pub error: Option<String>,
+    /// Whether a fresh proc was mounted in the prepared root.
+    /// Some on every report a backend returns, and false on
+    /// an early refusal.
     pub proc_mounted: Option<bool>,
+    /// Whether the sandbox directory stands removed at the
+    /// report's end. Some on every report a backend returns,
+    /// and true on an early refusal, where none was created.
     pub sandbox_removed: Option<bool>,
+    /// The run's phase timings. The total stands Some on
+    /// every report a backend returns, refusals included, and
+    /// None on the command line's unknown backend refusal,
+    /// which no backend answered.
     pub timings_ms: Timings,
+    /// The tail of the task's standard output, kept to the
+    /// harness's tail bound.
     pub stdout_tail: String,
+    /// The tail of the task's standard error, kept to the
+    /// harness's tail bound.
     pub stderr_tail: String,
 }
 
@@ -565,7 +597,13 @@ pub fn backend_names() -> Vec<&'static str> {
     vec!["namespace"]
 }
 
-/// The runner entry point the command line and the tests share.
+/// Run one task on the backend a name resolves to, with a
+/// default spec, no bound of MF-13 set and no caller
+/// environment keys carried over, the limitation MF-A15
+/// records. The command line does not use this entry, because
+/// it sets the bounds and the allow list its own caller named
+/// on its spec, and the test suite drives the backend
+/// directly.
 pub fn run_task(
     command: Vec<OsString>,
     root: &Path,
