@@ -859,11 +859,13 @@ pub const ORPHAN_GRACE_SECONDS: f64 = 5.0;
 /// boundary against a writer to the run root, and only when it is
 /// older than the grace period, which keeps a young directory
 /// from judgment and no more, and only when no live process
-/// names it, so a live run of any age keeps its sandbox. Past
-/// the grace a run still being prepared is kept safe by that
-/// naming alone, as its janitor names its directory from its
-/// spawn, and a run whose janitor did not start can still be
-/// swept once the grace has passed. A directory position is judged by the entry standing
+/// names it in the one reading of the process table the sweep
+/// judges against, so a live run named in that reading keeps
+/// its sandbox at any age. Past the grace a run still being
+/// prepared is kept safe by that naming alone, as its janitor
+/// names its directory from its spawn, and a run whose janitor
+/// did not start, or had not started when the reading was
+/// taken, can still be swept once the grace has passed. A directory position is judged by the entry standing
 /// there itself and never through a link it may be, so a symlink
 /// planted at a run directory position is neither read through
 /// nor removed, because the sweep never decides from data
