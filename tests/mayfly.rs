@@ -2858,6 +2858,91 @@ fn the_hidden_refusals_exit_at_1_when_standard_error_cannot_be_written() {
 }
 
 #[test]
+fn the_hidden_entry_points_refuse_a_token_of_the_wrong_shape() {
+    // The hidden entry points refuse to run unless the value
+    // under the internal token key has the token shape, thirty
+    // two lowercase hexadecimal characters, and that gate is
+    // the only thing standing between a direct invocation and
+    // the assembly's mounts performed on the host. The standing
+    // refusal pins remove the key, so they judge the gate on
+    // the key's absence and cannot tell a true shape test from
+    // a weakened one. This pin presents values that stand in
+    // the key and fail the shape in each of its terms, and
+    // each must draw the refusal in the entry point's own
+    // words. A genuine token with the next required argument
+    // withheld must pass the gate and stop at the missing
+    // argument instead, so the pin also fails on a gate that
+    // refuses everything.
+    let tmp = Tmp::new("token-shape");
+    let rootfs = tmp.path().join("run-refuse000004").join("rootfs");
+    let genuine = "ab".repeat(16);
+    let malformed: Vec<(&str, String)> = vec![
+        ("empty", String::new()),
+        ("short", "ab".to_string()),
+        ("long", format!("{}c", genuine)),
+        ("uppercase", "AB".repeat(16)),
+        ("outside the alphabet", "gh".repeat(16)),
+    ];
+    for (name, value) in &malformed {
+        for subcommand in ["__init", "__assemble-root"] {
+            let output = Command::new(mayfly_bin())
+                .arg(subcommand)
+                .arg("--rootfs")
+                .arg(rootfs.as_os_str())
+                .arg("--status-fd")
+                .arg("2")
+                .arg("--")
+                .arg("/bin/true")
+                .env(mayfly::INTERNAL_TOKEN_ENV, value)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{} {}", subcommand, name);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("refuses to run without the internal run token"),
+                "{} {} {}",
+                subcommand,
+                name,
+                stderr
+            );
+            assert!(
+                !stderr.contains("the prepared root failed"),
+                "{} {} {}",
+                subcommand,
+                name,
+                stderr
+            );
+        }
+    }
+    assert!(!rootfs.exists());
+    // The opening direction. The drive with a genuine token
+    // and no rootfs argument stops at the missing argument,
+    // and the init with a genuine token and no separator
+    // stops the same way, each at exit 1 with no refusal on
+    // its error stream and nothing created, because the entry
+    // point passed its gate before any host dependent act.
+    let drive = Command::new(mayfly_bin())
+        .arg("__assemble-root")
+        .env(mayfly::INTERNAL_TOKEN_ENV, &genuine)
+        .output()
+        .unwrap();
+    assert_eq!(drive.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&drive.stderr)
+        .contains("refuses to run without the internal run token"));
+    let init = Command::new(mayfly_bin())
+        .arg("__init")
+        .arg("--rootfs")
+        .arg(rootfs.as_os_str())
+        .env(mayfly::INTERNAL_TOKEN_ENV, &genuine)
+        .output()
+        .unwrap();
+    assert_eq!(init.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&init.stderr)
+        .contains("refuses to run without the internal run token"));
+    assert!(!rootfs.exists());
+}
+
+#[test]
 fn the_mount_point_parse_decodes_the_kernel_octal_escapes() {
     // The mounts table escapes a space in a mount point as a
     // backslash followed by three octal digits, and likewise
