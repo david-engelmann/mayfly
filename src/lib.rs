@@ -607,6 +607,32 @@ pub fn set_helper_exe(path: &Path) {
 /// provenance names the directory's own run id, an
 /// identification the sweep's own doc bounds.
 pub const PROVENANCE_NAME: &str = ".mayfly-provenance";
+
+/// The prefix every run directory's name carries, the run
+/// id standing after it. The runner builds the directory's
+/// name from the id under this prefix, and the sweep and
+/// the init read the id back out of the name, so the shape
+/// is stated here once and every seat that builds or parses
+/// the name takes it from this statement.
+pub const RUN_DIR_PREFIX: &str = "run-";
+/// The prefix every clean marker's name carries, the run
+/// id standing after it, under the same rule as the run
+/// directory's prefix. The runner and the sweep build the
+/// marker's name from the id, and the sweep reads the id
+/// back out of it.
+pub const CLEAN_MARKER_PREFIX: &str = ".mayfly-clean-";
+
+/// The name of the sandbox directory a run with this id
+/// stands under its root.
+pub fn run_dir_name(run_id: &str) -> String {
+    format!("{}{}", RUN_DIR_PREFIX, run_id)
+}
+
+/// The name of the clean marker a run with this id leaves
+/// beside its root.
+pub fn clean_marker_name(run_id: &str) -> String {
+    format!("{}{}", CLEAN_MARKER_PREFIX, run_id)
+}
 /// The byte bound the provenance read accumulates against. A
 /// provenance standing past it reads as no provenance at all,
 /// so an oversize file planted at the path names nothing the
@@ -881,7 +907,7 @@ fn sweep_one(
     let is_real_dir = std::fs::symlink_metadata(entry)
         .map(|meta| meta.file_type().is_dir())
         .unwrap_or(false);
-    if is_real_dir && name.starts_with("run-") {
+    if is_real_dir && name.starts_with(RUN_DIR_PREFIX) {
         let mtime = match entry.metadata().and_then(|m| m.modified()) {
             Ok(t) => t
                 .duration_since(std::time::UNIX_EPOCH)
@@ -892,7 +918,7 @@ fn sweep_one(
         if now_secs - mtime < ORPHAN_GRACE_SECONDS {
             return;
         }
-        let run_id = &name["run-".len()..];
+        let run_id = &name[RUN_DIR_PREFIX.len()..];
         if read_provenance(entry).as_deref() != Some(run_id) {
             return;
         }
@@ -903,10 +929,10 @@ fn sweep_one(
             _ => {}
         }
         let _ = std::fs::remove_dir_all(entry);
-        let marker = root.join(format!(".mayfly-clean-{}", run_id));
+        let marker = root.join(clean_marker_name(run_id));
         let _ = std::fs::remove_file(marker);
-    } else if entry.is_file() && name.starts_with(".mayfly-clean-") {
-        let run_dir = root.join(format!("run-{}", &name[".mayfly-clean-".len()..]));
+    } else if entry.is_file() && name.starts_with(CLEAN_MARKER_PREFIX) {
+        let run_dir = root.join(run_dir_name(&name[CLEAN_MARKER_PREFIX.len()..]));
         if run_dir.exists() {
             return;
         }
