@@ -3755,6 +3755,76 @@ fn cli_refuses_a_bound_value_under_its_floor_at_2() {
 }
 
 #[test]
+fn a_bound_value_at_its_floor_is_accepted_on_both_surfaces() {
+    // MF-13's floor rule refuses a value under the floor, so
+    // the floor value itself stands accepted, and that edge
+    // stands pinned for the timeout and the processor ceiling
+    // at exactly one second. The address space ceiling stood
+    // driven under its floor on both surfaces and above it,
+    // but at exactly 16777216 bytes on neither: a floor
+    // comparison written on the wrong side of the comparison,
+    // refusing the floor value itself, would refuse a value
+    // the contract accepts and no pin would fail. On the
+    // command line the call names the floor value beside an
+    // unknown backend, and the unknown backend report at 125
+    // proves the value passed the floor check on its way to
+    // the backend resolution, where the wrong comparison
+    // answers 2 in the floor words with no report printed. On
+    // the library surface the spec carries the floor value
+    // through the recording writer backend of the floor pin
+    // above, its unshare missing the way the missing unshare
+    // pin leaves it, and the run reaches the writer and
+    // answers with the launch failure of its missing unshare,
+    // where the wrong comparison refuses at the bound check
+    // in the floor sentence with the writer never reached.
+    ensure_helper();
+    let tmp = Tmp::new("bound-cli-floor-value");
+    let mut out: Vec<u8> = Vec::new();
+    let mut err: Vec<u8> = Vec::new();
+    let mut args = vec![
+        os("run"),
+        os("--root"),
+        tmp.path().as_os_str().to_os_string(),
+        os("--max-memory"),
+        os("16777216"),
+        os("--backend"),
+        os("nosuch"),
+        os("--"),
+    ];
+    args.extend(cmd(&["/bin/echo", "landed"]));
+    let code = cli_main(&args, &mut out, &mut err);
+    assert_eq!(code, HARNESS_EXIT_CODE);
+    assert!(err.is_empty());
+    let payload: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(payload["backend"], "nosuch");
+    assert_eq!(payload["outcome"], "harness_error");
+    assert_eq!(payload["error"], "unknown backend, nosuch");
+    assert_eq!(dir_names(tmp.path()), Vec::<String>::new());
+    let tmp = Tmp::new("bound-floor-value");
+    let preparations: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let record = preparations.clone();
+    let mut backend =
+        NamespaceBackend::with_unshare_path(Some(PathBuf::from("/nonexistent/unshare")));
+    backend.provenance_writer = Some(Arc::new(move |dir: &Path, _run_id: &str| {
+        record.lock().unwrap().push(dir.to_path_buf());
+        Ok(())
+    }));
+    let mut memory_spec = spec(py_cmd("pass"), tmp.path());
+    memory_spec.max_memory_bytes = Some(16777216);
+    let report = backend.run(&memory_spec);
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some(
+            "could not launch unshare, [Errno 2] No such file or directory: '/nonexistent/unshare'"
+        )
+    );
+    assert_eq!(preparations.lock().unwrap().len(), 1);
+    assert_eq!(report.sandbox_removed, Some(true));
+    assert!(dir_names(tmp.path()).is_empty());
+}
+
+#[test]
 fn the_bounds_never_reach_the_task_environment() {
     if !require_sandbox() {
         return;
