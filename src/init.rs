@@ -690,6 +690,17 @@ fn opt_value<'a>(opts: &'a [OsString], name: &str) -> Option<&'a OsString> {
         .and_then(|index| opts.get(index + 1))
 }
 
+/// The named option's value parsed into the type the
+/// caller reads it as, or None where the option stands
+/// absent, its value is not text, or its text does not
+/// parse, the one parse rule every numbered option of
+/// the init is read under.
+fn opt_parsed<T: std::str::FromStr>(opts: &[OsString], name: &str) -> Option<T> {
+    opt_value(opts, name)
+        .and_then(|value| value.to_str())
+        .and_then(|text| text.parse().ok())
+}
+
 /// Write one line to standard error without ever panicking.
 ///
 /// The hidden entry points report their refusals and the
@@ -765,10 +776,7 @@ pub fn init_main(args: &[OsString]) -> i32 {
             .iter()
             .position(|arg| arg.as_os_str() == "--")
             .unwrap_or(args.len());
-        return match opt_value(&args[..opts_end], "--status-fd")
-            .and_then(|value| value.to_str())
-            .and_then(|text| text.parse().ok())
-        {
+        return match opt_parsed(&args[..opts_end], "--status-fd") {
             Some(fd) => fail(fd, &detail),
             None => 1,
         };
@@ -783,10 +791,7 @@ pub fn init_main(args: &[OsString]) -> i32 {
         Some(value) => PathBuf::from(value),
         None => return 1,
     };
-    let status_fd: i32 = match opt_value(opts, "--status-fd")
-        .and_then(|value| value.to_str())
-        .and_then(|text| text.parse().ok())
-    {
+    let status_fd: i32 = match opt_parsed(opts, "--status-fd") {
         Some(fd) => fd,
         None => return 1,
     };
@@ -795,12 +800,8 @@ pub fn init_main(args: &[OsString]) -> i32 {
     // caller set the bound. A value that does not read as a
     // count names no ceiling, as an absent option does not,
     // because the supervisor writes only counts it validated.
-    let max_cpu_seconds: Option<u64> = opt_value(opts, "--max-cpu")
-        .and_then(|value| value.to_str())
-        .and_then(|text| text.parse().ok());
-    let max_memory_bytes: Option<u64> = opt_value(opts, "--max-memory")
-        .and_then(|value| value.to_str())
-        .and_then(|text| text.parse().ok());
+    let max_cpu_seconds: Option<u64> = opt_parsed(opts, "--max-cpu");
+    let max_memory_bytes: Option<u64> = opt_parsed(opts, "--max-memory");
     if command.is_empty() {
         return fail(status_fd, "no command was given");
     }
