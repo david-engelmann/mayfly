@@ -2869,50 +2869,69 @@ fn the_hidden_entry_points_refuse_a_token_of_the_wrong_shape() {
     // a weakened one. This pin presents values that stand in
     // the key and fail the shape in each of its terms, and
     // each must draw the refusal in the entry point's own
-    // words. A genuine token with the next required argument
-    // withheld must pass the gate and stop at the missing
-    // argument instead, so the pin also fails on a gate that
-    // refuses everything.
+    // words. The malformed drives withhold each entry point's
+    // next required argument, the drive its rootfs argument
+    // and the init its separator, so a gate weakened enough
+    // to admit a value stops at the missing argument, at exit
+    // 1 with no refusal in its words, and never reaches the
+    // assembly: the pin is safe to run against the weakened
+    // forms it exists to catch, and the refusal words are
+    // what discriminate them. A genuine token with the next
+    // required argument withheld must pass the gate and stop
+    // at the missing argument instead, so the pin also fails
+    // on a gate that refuses everything.
     let tmp = Tmp::new("token-shape");
     let rootfs = tmp.path().join("run-refuse000004").join("rootfs");
     let genuine = "ab".repeat(16);
     let malformed: Vec<(&str, String)> = vec![
         ("empty", String::new()),
         ("short", "ab".to_string()),
+        ("thirty-one", "ab".repeat(15) + "a"),
         ("long", format!("{}c", genuine)),
         ("uppercase", "AB".repeat(16)),
         ("outside the alphabet", "gh".repeat(16)),
     ];
     for (name, value) in &malformed {
-        for subcommand in ["__init", "__assemble-root"] {
-            let output = Command::new(mayfly_bin())
-                .arg(subcommand)
-                .arg("--rootfs")
-                .arg(rootfs.as_os_str())
-                .arg("--status-fd")
-                .arg("2")
-                .arg("--")
-                .arg("/bin/true")
-                .env(mayfly::INTERNAL_TOKEN_ENV, value)
-                .output()
-                .unwrap();
-            assert_eq!(output.status.code(), Some(1), "{} {}", subcommand, name);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains("refuses to run without the internal run token"),
-                "{} {} {}",
-                subcommand,
-                name,
-                stderr
-            );
-            assert!(
-                !stderr.contains("the prepared root failed"),
-                "{} {} {}",
-                subcommand,
-                name,
-                stderr
-            );
-        }
+        let drive = Command::new(mayfly_bin())
+            .arg("__assemble-root")
+            .env(mayfly::INTERNAL_TOKEN_ENV, value)
+            .output()
+            .unwrap();
+        assert_eq!(drive.status.code(), Some(1), "__assemble-root {}", name);
+        let stderr = String::from_utf8_lossy(&drive.stderr);
+        assert!(
+            stderr.contains("refuses to run without the internal run token"),
+            "__assemble-root {} {}",
+            name,
+            stderr
+        );
+        assert!(
+            !stderr.contains("the prepared root failed"),
+            "__assemble-root {} {}",
+            name,
+            stderr
+        );
+        let init = Command::new(mayfly_bin())
+            .arg("__init")
+            .arg("--rootfs")
+            .arg(rootfs.as_os_str())
+            .env(mayfly::INTERNAL_TOKEN_ENV, value)
+            .output()
+            .unwrap();
+        assert_eq!(init.status.code(), Some(1), "__init {}", name);
+        let stderr = String::from_utf8_lossy(&init.stderr);
+        assert!(
+            stderr.contains("refuses to run without the internal run token"),
+            "__init {} {}",
+            name,
+            stderr
+        );
+        assert!(
+            !stderr.contains("the prepared root failed"),
+            "__init {} {}",
+            name,
+            stderr
+        );
     }
     assert!(!rootfs.exists());
     // The opening direction. The drive with a genuine token
