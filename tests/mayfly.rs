@@ -2427,6 +2427,58 @@ fn canonical_root_resolves_the_standing_prefix_and_keeps_the_missing_tail() {
         .join("grandchild");
     assert_eq!(mayfly::canonical_root(&via_link), expected);
     assert_eq!(mayfly::canonical_root(&link), mayfly::canonical_root(&real));
+    // A parent reference over a component that does not
+    // stand cancels that component, because the failed
+    // canonicalizations on the climb prove it is not
+    // there for the kernel to resolve through, and a
+    // current directory reference names the directory it
+    // stands in. A form that fell back to the given
+    // spelling at either shape would hand the runner and
+    // the sweep different spellings of this root once the
+    // missing component's neighbours exist.
+    let through_missing = real.join("missing").join("..").join("child");
+    assert_eq!(
+        mayfly::canonical_root(&through_missing),
+        mayfly::canonical_root(&real).join("child")
+    );
+    let through_dot = real.join(".").join("child");
+    assert_eq!(
+        mayfly::canonical_root(&through_dot),
+        mayfly::canonical_root(&real).join("child")
+    );
+}
+
+#[test]
+fn a_run_under_a_root_spelled_through_a_missing_parent_reports_the_canonical_sandbox_dir() {
+    // The runner's half of the same shape at the run
+    // level. The root reaches the runner spelled through
+    // a component that does not stand, cancelled by a
+    // parent reference behind it. The sandbox directory
+    // the run reports must stand under the canonical
+    // spelling the sweep will judge under once the run's
+    // own creation has made the root's neighbours stand,
+    // because a later sweep canonicalizes the root it is
+    // handed and a report, a janitor, and an init naming
+    // the spelled form would name a directory that
+    // sweep's candidates never carry. Against a runner
+    // that kept the given spelling for this root the
+    // report names the spelled path and this pin fails
+    // on the comparison.
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("canonical-root-dotdot");
+    let base = tmp.path().join("base");
+    std::fs::create_dir_all(&base).unwrap();
+    let spelled = base.join("missing").join("..").join("runs");
+    let report = run_task(py_cmd("pass"), &spelled);
+    assert_eq!(report.outcome, Outcome::Task);
+    let canonical = mayfly::canonical_root(&base).join("runs");
+    assert_eq!(
+        report.sandbox_dir,
+        format!("{}/run-{}", canonical.display(), report.run_id)
+    );
+    assert_eq!(report.sandbox_removed, Some(true));
 }
 
 // ---------- the fake unshare interrupt protocol ----------

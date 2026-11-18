@@ -886,48 +886,52 @@ pub fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 /// agrees on.
 ///
 /// The walk climbs from the root toward the filesystem
-/// root, canonicalizing the deepest prefix that stands
-/// and joining the plain name components below it
-/// verbatim, so a root under parents a runner is about to
-/// create takes the canonical spelling of the part that
-/// stands, and the tail the runner then creates is
-/// canonical by construction. A root that reaches no
-/// canonicalizable prefix, or whose part that does not
-/// stand is cut off by a component that is not a plain
-/// name, keeps the spelling it was given.
+/// root until a prefix of it canonicalizes, and the
+/// components below that prefix are then applied to the
+/// canonical form in order: a plain name is joined, a
+/// current directory reference is skipped, and a parent
+/// reference removes the last component standing. A
+/// parent reference names the same directory the kernel
+/// would reach at every step it is applied, because the
+/// component it removes either does not stand yet, which
+/// the failed canonicalizations on the climb proved of
+/// it, or stands inside a canonical prefix, which
+/// carries no links for it to resolve through. A root
+/// under parents a runner is about to create therefore
+/// takes the canonical spelling whole, and the tail the
+/// runner then creates is canonical by construction. A
+/// root that reaches no canonicalizable prefix at all
+/// keeps the spelling it was given.
 pub fn canonical_root(root: &Path) -> PathBuf {
-    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    use std::path::Component;
+    let mut suffix: Vec<Component> = Vec::new();
     let mut cursor = root;
-    loop {
-        if let Ok(mut resolved) = std::fs::canonicalize(cursor) {
-            for name in tail.iter().rev() {
-                resolved.push(name);
-            }
-            return resolved;
+    let mut resolved = loop {
+        if let Ok(prefix) = std::fs::canonicalize(cursor) {
+            break prefix;
         }
-        match cursor.file_name() {
-            Some(name) => {
-                tail.push(name);
+        match cursor.components().next_back() {
+            Some(component @ (Component::Normal(_) | Component::ParentDir | Component::CurDir)) => {
+                suffix.push(component);
                 match cursor.parent() {
                     Some(parent) if !parent.as_os_str().is_empty() => cursor = parent,
-                    _ => {
-                        // Nothing stands above the first
-                        // component but the current
-                        // directory, which is the prefix a
-                        // relative root is read against.
-                        if let Ok(mut resolved) = std::fs::canonicalize(".") {
-                            for name in tail.iter().rev() {
-                                resolved.push(name);
-                            }
-                            return resolved;
-                        }
-                        return root.to_path_buf();
-                    }
+                    _ if cursor != Path::new(".") => cursor = Path::new("."),
+                    _ => return root.to_path_buf(),
                 }
             }
-            None => return root.to_path_buf(),
+            _ => return root.to_path_buf(),
+        }
+    };
+    for component in suffix.iter().rev() {
+        match component {
+            Component::Normal(name) => resolved.push(name),
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            _ => {}
         }
     }
+    resolved
 }
 
 /// The seconds a sandbox directory must stand untouched
