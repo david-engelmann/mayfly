@@ -2296,6 +2296,51 @@ fn one_sweep_answers_each_candidate_from_the_one_table() {
     assert!(!unreferenced.exists());
 }
 
+#[test]
+fn the_sweep_keeps_each_candidate_inside_its_grace_period() {
+    // MF-12 states the sweep's terms as a conjunction, and one
+    // term is that a candidate is swept only when it is older
+    // than the grace period. Every other sweep pin ages its
+    // candidates past the grace before it drives the sweep, so
+    // the age term is the one term no pin discriminated: a
+    // sweep that dropped both age returns would judge a
+    // directory created a moment ago, in the segment between
+    // its creation and its janitor's spawn where MF-12 names
+    // no other protection, and every standing pin would still
+    // pass. Four candidates stand here against a table that
+    // reads clean and names nothing: a young run directory
+    // whose provenance names it, that shape aged past the
+    // grace, a young clean marker whose run directory is gone,
+    // and that marker aged. The young candidates stand and
+    // the aged ones are swept, so this pin fails on a sweep
+    // missing its age term on the young assertions and on a
+    // sweep that removes nothing on the aged ones.
+    let tmp = Tmp::new("sweep-grace");
+    let root_dir = tmp.path().join("root");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let young_dir = root_dir.join("run-ffff00000001");
+    std::fs::create_dir_all(&young_dir).unwrap();
+    std::fs::write(young_dir.join(".mayfly-provenance"), "ffff00000001\n").unwrap();
+    let aged_dir = plant_sweepable(&root_dir, "ffff00000002");
+    let young_marker = root_dir.join(".mayfly-clean-ffff00000003");
+    std::fs::write(&young_marker, format!("{}\n", "ab".repeat(16))).unwrap();
+    let aged_marker = root_dir.join(".mayfly-clean-ffff00000004");
+    std::fs::write(&aged_marker, format!("{}\n", "ab".repeat(16))).unwrap();
+    age_directory(&aged_marker, 60.0);
+    let fake = fake_proc_table(
+        &tmp.path().join("fakeproc-grace"),
+        &[(
+            "424242",
+            FakeCmdline::Bytes(b"mayfly-test-unrelated".to_vec()),
+        )],
+    );
+    sweep_orphans_in(&root_dir, &fake);
+    assert!(young_dir.exists());
+    assert!(!aged_dir.exists());
+    assert!(young_marker.exists());
+    assert!(!aged_marker.exists());
+}
+
 // ---------- the fake unshare interrupt protocol ----------
 
 const FAKE_UNSHARE: &str = r#"#!/usr/bin/env python3
