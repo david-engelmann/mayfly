@@ -2826,7 +2826,6 @@ fn the_init_drive_refuses_without_the_internal_token() {
     assert!(!sandbox.exists());
 }
 
-
 #[test]
 fn the_hidden_refusals_exit_at_1_when_standard_error_cannot_be_written() {
     // The hidden entry points report their refusals on
