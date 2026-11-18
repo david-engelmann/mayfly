@@ -287,10 +287,10 @@ fn write_provenance_init(rootfs: &Path) {
         Some(name) => name,
         None => return,
     };
-    if !name.starts_with("run-") {
+    if !name.starts_with(crate::RUN_DIR_PREFIX) {
         return;
     }
-    let run_id = &name["run-".len()..];
+    let run_id = &name[crate::RUN_DIR_PREFIX.len()..];
     let _ = crate::write_provenance(sandbox, run_id);
 }
 

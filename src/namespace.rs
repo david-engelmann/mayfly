@@ -36,8 +36,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
-    helper_exe, ms_since, now, py_os_error, py_os_error_path, round3, sweep_orphans,
-    write_provenance, Outcome, RunReport, RunSpec, SignalGuard, TailBuffer, Timings,
+    clean_marker_name, helper_exe, ms_since, now, py_os_error, py_os_error_path, round3,
+    run_dir_name, sweep_orphans, write_provenance, Outcome, RunReport, RunSpec, SignalGuard,
+    TailBuffer, Timings,
 };
 
 pub type ProvenanceWriter = dyn Fn(&Path, &str) -> io::Result<()> + Send + Sync;
@@ -436,8 +437,8 @@ impl NamespaceBackend {
                 return report;
             }
         };
-        let sandbox_dir = spec.root.join(format!("run-{}", run_id));
-        let marker = spec.root.join(format!(".mayfly-clean-{}", run_id));
+        let sandbox_dir = spec.root.join(run_dir_name(&run_id));
+        let marker = spec.root.join(clean_marker_name(&run_id));
         let mut report = RunReport::new(
             self.name(),
             &run_id,
