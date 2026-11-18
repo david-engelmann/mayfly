@@ -2341,6 +2341,94 @@ fn the_sweep_keeps_each_candidate_inside_its_grace_period() {
     assert!(!aged_marker.exists());
 }
 
+// ---------- the canonical spelling of the root ----------
+
+#[test]
+fn the_sweep_judges_a_candidate_under_the_canonical_spelling_of_its_root() {
+    // The sweep's liveness judgement is a byte comparison,
+    // and the two sides of it are built under one spelling
+    // of the root. A candidate stands under a root whose
+    // canonical spelling the planted command line names,
+    // and the sweep is driven through a symlinked spelling
+    // of that same root. A sweep that built its candidates
+    // from the spelling it was handed would test the link's
+    // bytes against the canonical bytes the command line
+    // carries, see no naming, and remove a directory whose
+    // run the table names as live. The second candidate,
+    // which no command line names, is the control: it is
+    // swept under either spelling, so the pin also fails on
+    // a sweep that removes nothing.
+    let tmp = Tmp::new("sweep-spelling");
+    let real_root = tmp.path().join("real-root");
+    std::fs::create_dir_all(&real_root).unwrap();
+    let canonical = mayfly::canonical_root(&real_root);
+    let named = plant_sweepable(&canonical, "eeee0000000c");
+    let unnamed = plant_sweepable(&canonical, "eeee0000000d");
+    let link_root = tmp.path().join("link-root");
+    std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+    let fake = fake_proc_table(
+        &tmp.path().join("fakeproc-spelling"),
+        &[(
+            "424242",
+            FakeCmdline::Bytes(named.as_os_str().as_bytes().to_vec()),
+        )],
+    );
+    sweep_orphans_in(&link_root, &fake);
+    assert!(named.exists());
+    assert!(!unnamed.exists());
+}
+
+#[test]
+fn a_run_under_a_symlinked_root_spelling_reports_the_canonical_sandbox_dir() {
+    // The runner builds its sandbox path from the canonical
+    // form of the root it was given, so every process the
+    // run spawns names the one spelling the sweep judges
+    // under. A run handed its root through a symlink must
+    // therefore report its sandbox directory under the
+    // canonical spelling, not the link's. Against a runner
+    // that built from the given spelling the report names
+    // the link's path and this pin fails on the comparison.
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("canonical-root-run");
+    let real_root = tmp.path().join("real-root");
+    std::fs::create_dir_all(&real_root).unwrap();
+    let link_root = tmp.path().join("link-root");
+    std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+    let report = run_task(py_cmd("pass"), &link_root);
+    assert_eq!(report.outcome, Outcome::Task);
+    let canonical = mayfly::canonical_root(&real_root);
+    assert_eq!(
+        report.sandbox_dir,
+        format!("{}/run-{}", canonical.display(), report.run_id)
+    );
+    assert_eq!(report.sandbox_removed, Some(true));
+}
+
+#[test]
+fn canonical_root_resolves_the_standing_prefix_and_keeps_the_missing_tail() {
+    // The canonical form is taken from the deepest prefix
+    // that stands, with the tail that does not stand yet
+    // joined verbatim behind it, so a root under parents
+    // the runner is about to create still resolves to the
+    // one spelling. A form that canonicalized the whole
+    // root or nothing would fail the first comparison on a
+    // root whose tail is missing, and a form that left a
+    // symlinked prefix unresolved would fail the second.
+    let tmp = Tmp::new("canonical-helper");
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let via_link = link.join("child").join("grandchild");
+    let expected = mayfly::canonical_root(&real)
+        .join("child")
+        .join("grandchild");
+    assert_eq!(mayfly::canonical_root(&via_link), expected);
+    assert_eq!(mayfly::canonical_root(&link), mayfly::canonical_root(&real));
+}
+
 // ---------- the fake unshare interrupt protocol ----------
 
 const FAKE_UNSHARE: &str = r#"#!/usr/bin/env python3
