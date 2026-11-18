@@ -2826,6 +2826,38 @@ fn the_init_drive_refuses_without_the_internal_token() {
     assert!(!sandbox.exists());
 }
 
+
+#[test]
+fn the_hidden_refusals_exit_at_1_when_standard_error_cannot_be_written() {
+    // The hidden entry points report their refusals on
+    // standard error and exit at 1. A print that panics on a
+    // failed write would trade that exit for a panic at 101
+    // where the error stream itself is broken, so both
+    // refusals are driven here with standard error pointed at
+    // /dev/full, where every write fails, and the pin reads
+    // the exit alone. Against a panicking print both drives
+    // die at 101 and the pin fails for that reason.
+    let tmp = Tmp::new("refusal-full-stderr");
+    let rootfs = tmp.path().join("run-refuse000003").join("rootfs");
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    for subcommand in ["__init", "__assemble-root"] {
+        let status = Command::new(mayfly_bin())
+            .arg(subcommand)
+            .arg("--rootfs")
+            .arg(rootfs.as_os_str())
+            .env_remove(mayfly::INTERNAL_TOKEN_ENV)
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(full.try_clone().unwrap()))
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(1), "{}", subcommand);
+    }
+    assert!(!rootfs.exists());
+}
+
 #[test]
 fn the_mount_point_parse_decodes_the_kernel_octal_escapes() {
     // The mounts table escapes a space in a mount point as a

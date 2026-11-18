@@ -690,6 +690,24 @@ fn opt_value<'a>(opts: &'a [OsString], name: &str) -> Option<&'a OsString> {
         .and_then(|index| opts.get(index + 1))
 }
 
+/// Write one line to standard error without ever panicking.
+///
+/// The hidden entry points report their refusals and the
+/// assembly drive's failure on standard error, and those
+/// reports are the last thing the process does before it
+/// exits at 1. A print through eprintln! panics when the
+/// write itself fails, on a closed descriptor or a full
+/// disk, and the process then dies at 101 under a panic
+/// message the same broken stream cannot carry, an exit
+/// none of the entry points names. This writes through a
+/// locked handle in the shape the command line's refusals
+/// take and discards the result, so the exit is 1 on a
+/// broken stream as on a sound one.
+fn report_line(text: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{}", text);
+}
+
 /// The init entry point, reached through the hidden __init
 /// subcommand of the mayfly binary with the argv the unshare
 /// call built.
@@ -716,7 +734,7 @@ pub fn init_main(args: &[OsString]) -> i32 {
     match std::env::var(crate::INTERNAL_TOKEN_ENV) {
         Ok(value) if crate::token_shape_ok(&value) => {}
         _ => {
-            eprintln!("mayfly __init refuses to run without the internal run token");
+            report_line("mayfly __init refuses to run without the internal run token");
             return 1;
         }
     }
@@ -832,7 +850,7 @@ pub fn assemble_root_main(args: &[OsString]) -> i32 {
     match std::env::var(crate::INTERNAL_TOKEN_ENV) {
         Ok(value) if crate::token_shape_ok(&value) => {}
         _ => {
-            eprintln!("mayfly __assemble-root refuses to run without the internal run token");
+            report_line("mayfly __assemble-root refuses to run without the internal run token");
             return 1;
         }
     }
@@ -843,7 +861,7 @@ pub fn assemble_root_main(args: &[OsString]) -> i32 {
     match assemble_root(&rootfs) {
         Ok(_) => 0,
         Err(detail) => {
-            eprintln!("the prepared root failed, {}", detail);
+            report_line(&format!("the prepared root failed, {}", detail));
             1
         }
     }
