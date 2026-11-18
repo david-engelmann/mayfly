@@ -803,7 +803,11 @@ struct ProcTable {
 
 impl ProcTable {
     /// The pids in this reading whose command line names the
-    /// given path.
+    /// given path. The naming is byte for byte: the path's
+    /// bytes, in the spelling the caller built it with, must
+    /// stand somewhere in the command line's bytes, so a
+    /// process that names the same directory under another
+    /// spelling of it is not seen by this reading.
     fn referencing(&self, path: &Path) -> Vec<u32> {
         let needle = path.as_os_str().as_bytes();
         self.lines
@@ -903,7 +907,15 @@ pub const ORPHAN_GRACE_SECONDS: f64 = 5.0;
 /// prepared is kept safe by that naming alone, as its janitor
 /// names its directory from its spawn, and a run whose janitor
 /// did not start, or had not started when the reading was
-/// taken, can still be swept once the grace has passed. A directory position is judged by the entry standing
+/// taken, can still be swept once the grace has passed.
+/// The naming that judgement rests on is byte for byte
+/// against a candidate built from this invocation's spelling
+/// of the root, and a live run's processes name its directory
+/// under that run's own spelling, so two invocations that
+/// reach one root by different spellings do not see each
+/// other's runs, and a directory whose run is still live can
+/// be swept by an invocation that reaches the root under
+/// another spelling. A directory position is judged by the entry standing
 /// there itself and never through a link it may be, so a symlink
 /// planted at a run directory position is neither read through
 /// nor removed, because the sweep never decides from data
