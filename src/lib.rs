@@ -881,6 +881,59 @@ pub fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+/// The canonical form of a run root, the one spelling
+/// every seat that builds or judges a path under the root
+/// agrees on.
+///
+/// The walk climbs from the root toward the filesystem
+/// root until a prefix of it canonicalizes, and the
+/// components below that prefix are then applied to the
+/// canonical form in order: a plain name is joined, a
+/// current directory reference is skipped, and a parent
+/// reference removes the last component standing. A
+/// parent reference names the same directory the kernel
+/// would reach at every step it is applied, because the
+/// component it removes either does not stand yet, which
+/// the failed canonicalizations on the climb proved of
+/// it, or stands inside a canonical prefix, which
+/// carries no links for it to resolve through. A root
+/// under parents a runner is about to create therefore
+/// takes the canonical spelling whole, and the tail the
+/// runner then creates is canonical by construction. A
+/// root that reaches no canonicalizable prefix at all
+/// keeps the spelling it was given.
+pub fn canonical_root(root: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut suffix: Vec<Component> = Vec::new();
+    let mut cursor = root;
+    let mut resolved = loop {
+        if let Ok(prefix) = std::fs::canonicalize(cursor) {
+            break prefix;
+        }
+        match cursor.components().next_back() {
+            Some(component @ (Component::Normal(_) | Component::ParentDir | Component::CurDir)) => {
+                suffix.push(component);
+                match cursor.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => cursor = parent,
+                    _ if cursor != Path::new(".") => cursor = Path::new("."),
+                    _ => return root.to_path_buf(),
+                }
+            }
+            _ => return root.to_path_buf(),
+        }
+    };
+    for component in suffix.iter().rev() {
+        match component {
+            Component::Normal(name) => resolved.push(name),
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            _ => {}
+        }
+    }
+    resolved
+}
+
 /// The seconds a sandbox directory must stand untouched
 /// before the orphan sweep will judge it. The grace alone
 /// does not keep a run being prepared safe from the sweep.
@@ -908,14 +961,15 @@ pub const ORPHAN_GRACE_SECONDS: f64 = 5.0;
 /// names its directory from its spawn, and a run whose janitor
 /// did not start, or had not started when the reading was
 /// taken, can still be swept once the grace has passed.
-/// The naming that judgement rests on is byte for byte
-/// against a candidate built from this invocation's spelling
-/// of the root, and a live run's processes name its directory
-/// under that run's own spelling, so two invocations that
-/// reach one root by different spellings do not see each
-/// other's runs, and a directory whose run is still live can
-/// be swept by an invocation that reaches the root under
-/// another spelling. A directory position is judged by the entry standing
+/// The naming that judgement rests on is byte for byte,
+/// and both sides of it are built under one spelling of the
+/// root. The candidates here are built from the canonical
+/// form of the root this invocation was handed, and the
+/// runner builds every run's sandbox path from that same
+/// canonical form, so a live run's processes name its
+/// directory in the spelling the candidate carries,
+/// whichever spelling either invocation reached the root
+/// by. A directory position is judged by the entry standing
 /// there itself and never through a link it may be, so a symlink
 /// planted at a run directory position is neither read through
 /// nor removed, because the sweep never decides from data
@@ -927,6 +981,7 @@ pub const ORPHAN_GRACE_SECONDS: f64 = 5.0;
 /// directory is already gone is swept on the same terms. A
 /// sweep failure never breaks the run that triggered it.
 pub fn sweep_orphans_in(root: &Path, proc_dir: &Path) {
+    let root = &canonical_root(root);
     let entries: Vec<PathBuf> = match std::fs::read_dir(root) {
         Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
         Err(_) => return,
