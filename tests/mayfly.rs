@@ -2968,6 +2968,57 @@ fn cli_treats_an_option_shaped_token_after_a_value_option_as_a_missing_value() {
     assert!(glob_run_dirs(tmp.path()).is_empty());
 }
 
+#[test]
+fn cli_refuses_the_malformed_call_shapes_at_2() {
+    // The missing value refusal is pinned, and the bound
+    // refusals are pinned in their own entries. The four
+    // dispatch refusals stood in no pin: no arguments and a
+    // wrong subcommand answer the usage line alone, an
+    // unknown option and a missing root answer their
+    // sentence with the usage line, and a missing command
+    // answers its sentence alone. The unknown option arm is
+    // the load bearing one, because it is what keeps a
+    // hyphen led token in option position from falling
+    // through to the arm that takes the rest of the line as
+    // the command and runs it.
+    ensure_helper();
+    let tmp = Tmp::new("cli-malformed");
+    let usage = "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--net] [--timeout SECONDS] [--max-cpu SECONDS] [--max-memory BYTES] -- COMMAND...\n";
+    let root = tmp.path().as_os_str().to_os_string();
+    let shapes: Vec<(Vec<OsString>, String)> = vec![
+        (vec![], usage.to_string()),
+        (vec![os("bogus")], usage.to_string()),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root.clone(),
+                os("--bogus"),
+                os("--"),
+                os("/bin/true"),
+            ],
+            format!("mayfly run does not know the option --bogus\n{}", usage),
+        ),
+        (
+            vec![os("run"), os("--"), os("/bin/true")],
+            format!("mayfly run needs a --root directory\n{}", usage),
+        ),
+        (
+            vec![os("run"), os("--root"), root, os("--")],
+            "mayfly run needs a command after --\n".to_string(),
+        ),
+    ];
+    for (args, expected) in shapes {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = cli_main(&args, &mut out, &mut err);
+        assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
+        assert_eq!(String::from_utf8(err).unwrap(), expected);
+        assert!(out.is_empty());
+    }
+    assert!(dir_names(tmp.path()).is_empty());
+}
+
 // ---------- the init driven directly ----------
 
 fn unshare_path() -> PathBuf {
