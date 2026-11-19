@@ -405,6 +405,33 @@ fn codepoint_scan_fails_loudly_on_undecodable_input() {
 }
 
 #[test]
+fn codepoint_scan_reports_a_failed_output_write_as_a_scan_error() {
+    // The scanner's exits are 0, 1, and 2, and a write of
+    // its own output that fails is a scan error at exit 2,
+    // in the same voice as a file that cannot be read.
+    // /dev/full refuses every write, so the first per file
+    // line over a tree carrying one em dash already fails.
+    // Against printing through println! the scanner panics
+    // at exit 101 there, outside its own vocabulary, and
+    // this pin fails on that code.
+    let dir = temp_dir("scan-write-fails");
+    std::fs::write(dir.join("note.md"), "a\u{2014}b").unwrap();
+    let full = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+        .arg(&dir)
+        .stdout(std::process::Stdio::from(full))
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("scan error"));
+}
+
+#[test]
 fn codepoint_scan_counts_a_dash_in_a_file_with_no_suffix() {
     let dir = temp_dir("no-suffix");
     std::fs::write(dir.join("LICENSE"), "a\u{2014}b").unwrap();
