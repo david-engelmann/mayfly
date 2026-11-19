@@ -303,8 +303,14 @@ fn unique_hex() -> String {
 
 const FORCE_REFUSAL_SWITCH: &str = "MAYFLY_TEST_FORCE_SANDBOX_REFUSAL";
 
-fn probe_failure_is_host_refusal(report: &RunReport) -> bool {
-    let text = [
+/// The probe's one reading of a failed run's text. The
+/// report's error and its stderr tail, in that order, with
+/// empty parts dropped, joined by a single space. The
+/// classification reads the text lowercased and the refusal
+/// the probe hands back reads it trimmed, and both read the
+/// same text because both answer from the same failure.
+fn report_text(report: &RunReport) -> String {
+    [
         report.error.clone().unwrap_or_default(),
         report.stderr_tail.clone(),
     ]
@@ -312,7 +318,10 @@ fn probe_failure_is_host_refusal(report: &RunReport) -> bool {
     .filter(|part| !part.is_empty())
     .collect::<Vec<_>>()
     .join(" ")
-    .to_lowercase();
+}
+
+fn probe_failure_is_host_refusal(report: &RunReport) -> bool {
+    let text = report_text(report).to_lowercase();
     if text.contains("uid_map") {
         return true;
     }
@@ -346,16 +355,7 @@ fn probe_core(runner: &dyn Fn(Vec<OsString>, &Path) -> RunReport) -> (bool, Stri
     if report.outcome == Outcome::Task {
         return (true, String::new());
     }
-    let refusal = [
-        report.error.clone().unwrap_or_default(),
-        report.stderr_tail.clone(),
-    ]
-    .into_iter()
-    .filter(|part| !part.is_empty())
-    .collect::<Vec<_>>()
-    .join(" ")
-    .trim()
-    .to_string();
+    let refusal = report_text(&report).trim().to_string();
     if probe_failure_is_host_refusal(&report) {
         (
             false,
