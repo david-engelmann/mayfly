@@ -1202,6 +1202,32 @@ fn a_large_task_output_is_bounded_to_its_tail() {
 }
 
 #[test]
+fn a_large_task_error_output_is_bounded_to_its_tail() {
+    // The output tail's bound stands pinned at the run
+    // level by the pin above, and the buffer stands pinned
+    // over small feeds by the pin below. The error stream
+    // is drained by its own spawn block into a buffer of
+    // its own, and no pin read that seat: a drain that
+    // accumulated the stream without the buffer would
+    // leave the report's error tail unbounded, and one
+    // that dropped the stream or fed it into the output
+    // buffer would leave it empty. This pin drives the
+    // same oversized body down the error stream and reads
+    // the tail the report carries for it.
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("large-error-output");
+    let script = "import sys\n\
+        sys.stderr.write('x' * 300000)\n\
+        sys.stderr.write('the-end-marker')\n";
+    let report = run_task(py_cmd(script), tmp.path());
+    assert_eq!(report.outcome, Outcome::Task);
+    assert!(report.stderr_tail.chars().count() <= TAIL_CHARS);
+    assert!(report.stderr_tail.ends_with("the-end-marker"));
+}
+
+#[test]
 fn tail_buffer_reads_back_the_last_chars_after_small_feeds() {
     let buffer = mayfly::TailBuffer::new();
     let unit = "aé€b";
