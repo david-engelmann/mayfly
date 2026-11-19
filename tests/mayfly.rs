@@ -2751,6 +2751,76 @@ fn a_held_status_pipe_costs_the_run_no_descriptor() {
     }
 }
 
+const FAKE_UNSHARE_NOFORK: &str = r#"#!/usr/bin/env python3
+import os
+import sys
+
+argv = sys.argv[1:]
+index = argv.index("__init")
+argv[index - 1] = "{SHIM}"
+os.execve("{UNSHARE}", ["{UNSHARE}"] + argv, os.environ)
+"#;
+
+const INIT_SHIM_NOFORK: &str = r#"#!/usr/bin/env python3
+import os
+import resource
+import sys
+
+limits = resource.getrlimit(resource.RLIMIT_NPROC)
+resource.setrlimit(resource.RLIMIT_NPROC, (0, limits[1]))
+os.execve("{HELPER}", ["{HELPER}"] + sys.argv[1:], os.environ)
+"#;
+
+fn write_fake_unshare_nofork(fakebin: &Path) -> PathBuf {
+    std::fs::create_dir_all(fakebin).unwrap();
+    let shim = fakebin.join("init-shim");
+    let shim_text = INIT_SHIM_NOFORK
+        .replacen("#!/usr/bin/env python3", &format!("#!{}", PY.display()), 1)
+        .replace("{HELPER}", &mayfly_bin().display().to_string());
+    std::fs::write(&shim, shim_text).unwrap();
+    let fake_text = FAKE_UNSHARE_NOFORK
+        .replacen("#!/usr/bin/env python3", &format!("#!{}", PY.display()), 1)
+        .replace("{SHIM}", &shim.display().to_string())
+        .replace("{UNSHARE}", &unshare_path().display().to_string());
+    let fake = fakebin.join("unshare");
+    std::fs::write(&fake, fake_text).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fake
+}
+
+#[test]
+fn an_init_whose_fork_fails_reports_the_errno_it_met() {
+    // The fake unshare execs the real unshare with a shim
+    // standing where the init stands. The shim sets the
+    // process count limit to zero in its own process and
+    // execs the real init, so the init assembles its root
+    // and then meets a fork that fails with EAGAIN at the
+    // entry of supervise. The report must carry that errno
+    // in the start error words. Against an init that
+    // returns from that seat in silence, the report carries
+    // the runner's generic fallback instead, and this pin
+    // fails on the words.
+    if !require_sandbox() {
+        return;
+    }
+    ensure_helper();
+    let tmp = Tmp::new("init-fork-fails");
+    let fake = write_fake_unshare_nofork(&tmp.path().join("fakebin"));
+    let root_dir = tmp.path().join("root");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let backend = NamespaceBackend::with_unshare_path(Some(fake));
+    let report = backend.run(&spec(py_cmd("pass"), &root_dir));
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("could not start the task, could not fork the task process, 11 Resource temporarily unavailable")
+    );
+    assert_eq!(report.task_exit_code, None);
+    assert!(glob_run_dirs(&root_dir).is_empty());
+}
+
 #[test]
 fn a_slow_janitor_on_the_clean_path_is_reaped_by_a_detached_waiter() {
     // A janitor kept at its cleanup past the runner's ten

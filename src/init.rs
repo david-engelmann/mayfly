@@ -501,7 +501,15 @@ fn supervise(
     // The array is owned by this call and holds exactly the two
     // descriptors pipe2 promises to write.
     if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return 1;
+        let errno = errno_now();
+        return fail(
+            status_fd,
+            &format!(
+                "could not start the task, could not create the exec pipe, {} {}",
+                errno,
+                strerror(errno)
+            ),
+        );
     }
     let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
     // Prepare the exec arguments before the fork, so the child
@@ -572,7 +580,15 @@ fn supervise(
         }
     }
     if child < 0 {
-        return 1;
+        let errno = errno_now();
+        return fail(
+            status_fd,
+            &format!(
+                "could not start the task, could not fork the task process, {} {}",
+                errno,
+                strerror(errno)
+            ),
+        );
     }
     drop(argv);
     drop(argv_ptrs);
