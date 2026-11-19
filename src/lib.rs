@@ -146,7 +146,11 @@ pub struct RunSpec {
     pub command: Vec<OsString>,
     /// The run root the run's sandbox directory is created
     /// under, and the directory the orphan sweep reads before
-    /// the run prepares its own.
+    /// the run prepares its own. The root is read under its
+    /// canonical form, the form canonical_root computes: the
+    /// sandbox directory is created under that spelling, and
+    /// the sweep reads under it, whichever spelling the
+    /// caller handed in.
     pub root: PathBuf,
     /// The caller environment keys the scrub carries into the
     /// sandbox. RunSpec::new defaults the list to PATH alone.
@@ -306,8 +310,10 @@ pub struct RunReport {
     /// The run's id, drawn for the run. Empty on an early
     /// refusal.
     pub run_id: String,
-    /// The sandbox directory the run prepared under the root.
-    /// Empty on an early refusal.
+    /// The sandbox directory the run prepared under the root,
+    /// named under the root's canonical spelling, so the path
+    /// stands resolved wherever the caller's spelling of the
+    /// root was not canonical. Empty on an early refusal.
     pub sandbox_dir: String,
     /// The command the run carried, as its caller named it.
     pub command: Vec<OsString>,
