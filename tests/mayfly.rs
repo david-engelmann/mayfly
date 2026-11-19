@@ -3242,6 +3242,23 @@ fn the_mount_point_parse_decodes_the_kernel_octal_escapes() {
         mayfly::init::decode_mount_point(r"/edge\377x"),
         "/edge\u{fffd}x"
     );
+    // The end of the field is the guard's own seat, where
+    // its length comparison is the term that decides. A
+    // backslash at the very end stands as itself, and so does
+    // a backslash with one digit after it or with two,
+    // because none of them leads three octal digits; a guard
+    // written one comparison off in the admitting direction
+    // reads one byte past the end on the two digit shape and
+    // panics inside the assembly the fallback walk serves. A
+    // complete escape at the exact end still decodes, because
+    // a mount point can end in an escaped space, and a guard
+    // written one comparison off in the refusing direction
+    // leaves it standing undecoded, so the walk would miss a
+    // tree bound under such a path.
+    assert_eq!(mayfly::init::decode_mount_point(r"/trail\"), r"/trail\");
+    assert_eq!(mayfly::init::decode_mount_point(r"/trail\0"), r"/trail\0");
+    assert_eq!(mayfly::init::decode_mount_point(r"/trail\04"), r"/trail\04");
+    assert_eq!(mayfly::init::decode_mount_point(r"/trail\040"), "/trail ");
 }
 
 #[test]
