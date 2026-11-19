@@ -413,7 +413,14 @@ impl NamespaceBackend {
             };
             return report;
         }
-        sweep_orphans(&spec.root);
+        // The run's paths are built from the canonical form
+        // of the root it was given, and the sweep below runs
+        // under that same form, so the janitor and the init
+        // name the sandbox under the one spelling the sweep
+        // judges its candidates under, whichever spelling
+        // reached the root here.
+        let root = crate::canonical_root(&spec.root);
+        sweep_orphans(&root);
         let mut timings = Timings::default();
         // The run id and the token are drawn before anything is
         // created under the root, so a failure of the random
@@ -437,8 +444,8 @@ impl NamespaceBackend {
                 return report;
             }
         };
-        let sandbox_dir = spec.root.join(run_dir_name(&run_id));
-        let marker = spec.root.join(clean_marker_name(&run_id));
+        let sandbox_dir = root.join(run_dir_name(&run_id));
+        let marker = root.join(clean_marker_name(&run_id));
         let mut report = RunReport::new(
             self.name(),
             &run_id,
