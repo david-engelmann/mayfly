@@ -1009,6 +1009,23 @@ pub fn sweep_orphans_in(root: &Path, proc_dir: &Path) {
     }
 }
 
+/// The modification time of the entry standing at a path, in
+/// seconds since the epoch, as the sweep judges an entry's
+/// age. None where the entry's metadata or its modification
+/// time cannot be read, the answer both of sweep_one's
+/// judgements take as a refusal to judge the entry at all. A
+/// time standing before the epoch reads as 0.0.
+fn entry_mtime_secs(entry: &Path) -> Option<f64> {
+    match entry.metadata().and_then(|m| m.modified()) {
+        Ok(t) => Some(
+            t.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+        ),
+        Err(_) => None,
+    }
+}
+
 fn sweep_one(
     root: &Path,
     proc_dir: &Path,
@@ -1027,12 +1044,9 @@ fn sweep_one(
         .map(|meta| meta.file_type().is_dir())
         .unwrap_or(false);
     if is_real_dir && name.starts_with(RUN_DIR_PREFIX) {
-        let mtime = match entry.metadata().and_then(|m| m.modified()) {
-            Ok(t) => t
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0),
-            Err(_) => return,
+        let mtime = match entry_mtime_secs(entry) {
+            Some(t) => t,
+            None => return,
         };
         if now_secs - mtime < ORPHAN_GRACE_SECONDS {
             return;
@@ -1055,12 +1069,9 @@ fn sweep_one(
         if run_dir.exists() {
             return;
         }
-        let mtime = match entry.metadata().and_then(|m| m.modified()) {
-            Ok(t) => t
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0),
-            Err(_) => return,
+        let mtime = match entry_mtime_secs(entry) {
+            Some(t) => t,
+            None => return,
         };
         if now_secs - mtime < ORPHAN_GRACE_SECONDS {
             return;
