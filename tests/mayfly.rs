@@ -2506,7 +2506,7 @@ def note(name):
         handle.write("noted\n")
 
 
-emit({"event": "ready", "proc_mounted": False})
+emit({"event": "ready", "proc_mounted": mode == "proc-mounted"})
 emit({"event": "started"})
 note("fake-started")
 if mode == "late-done":
@@ -2645,6 +2645,50 @@ fn an_interrupt_after_the_task_done_stamp_keeps_the_task_outcome() {
     assert_eq!(payload["task_exit_code"], 0);
     assert!(glob_run_dirs(&root_dir).is_empty());
     assert!(glob_clean_markers(&root_dir).is_empty());
+}
+
+#[test]
+fn the_report_carries_the_proc_mounted_answer_of_the_ready_event() {
+    // The report records whether a fresh proc was mounted
+    // in the prepared root, and the runner takes that answer
+    // from the ready event the init reports. On the hosts
+    // the fleet gates on the mount stands refused inside a
+    // user namespace, so no real run can stage the true arm,
+    // and the fake unshare is the one seam that can stage
+    // the event's value at will: its proc-mounted mode
+    // reports proc_mounted true on its ready event and
+    // takes the standing done shape otherwise. This pin
+    // drives the command line through the fake in that mode
+    // and in the standing done-early mode and reads the
+    // printed report's field in both directions. Against a
+    // runner that ignores the ready event's field and lets
+    // the backstop in run answer everywhere, the true arm
+    // fails, and against one that inverts the field both
+    // arms fail.
+    let tmp = Tmp::new("fake-proc-mounted");
+    for (mode, expected) in [("proc-mounted", true), ("done-early", false)] {
+        let root_dir = tmp.path().join(format!("root-{mode}"));
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let fakebin = tmp.path().join(format!("fakebin-{mode}"));
+        let mut proc = start_cli_with_fake_unshare(&root_dir, &fakebin, mode);
+        let noted = wait_until(
+            || {
+                glob_run_dirs(&root_dir)
+                    .iter()
+                    .any(|dir| dir.join("fake-done").exists())
+            },
+            30.0,
+        );
+        assert!(noted, "the fake sandbox never reported its task done");
+        signal_child(&proc, libc::SIGTERM);
+        let (code, out) = communicate(&mut proc, 30.0);
+        assert_eq!(code, 0, "{}", mode);
+        let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(payload["outcome"], "task", "{}", mode);
+        assert_eq!(payload["proc_mounted"], expected, "{}", mode);
+        assert!(glob_run_dirs(&root_dir).is_empty());
+        assert!(glob_clean_markers(&root_dir).is_empty());
+    }
 }
 
 #[test]
