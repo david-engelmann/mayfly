@@ -2341,6 +2341,48 @@ fn the_sweep_keeps_each_candidate_inside_its_grace_period() {
     assert!(!aged_marker.exists());
 }
 
+#[test]
+fn the_sweep_keeps_a_clean_marker_whose_run_directory_still_stands() {
+    // MF-A80. sweep_orphans_in's doc states that a clean
+    // marker whose run directory is already gone is swept on
+    // the same terms, which makes the marker arm's first term
+    // the absence of the run directory: where the directory
+    // still stands, the marker is not the sweep's to take,
+    // whatever its age. MF-A69's grace pin stages its clean
+    // markers with their run directories gone, the one shape
+    // that term passes trivially, so a sweep missing the
+    // absence return would remove an aged marker beside its
+    // standing directory and every pin would still pass. The
+    // directory here stands young, inside its grace period,
+    // so the directory arm returns on grace and cannot take
+    // the marker with it; the control marker, aged the same
+    // with its run directory gone, is swept, so the pin also
+    // fails on a sweep that removes nothing.
+    let tmp = Tmp::new("sweep-marker-standing-dir");
+    let root_dir = tmp.path().join("root");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let standing_dir = root_dir.join("run-ffff00000005");
+    std::fs::create_dir_all(&standing_dir).unwrap();
+    std::fs::write(standing_dir.join(".mayfly-provenance"), "ffff00000005\n").unwrap();
+    let kept_marker = root_dir.join(".mayfly-clean-ffff00000005");
+    std::fs::write(&kept_marker, format!("{}\n", "ab".repeat(16))).unwrap();
+    age_directory(&kept_marker, 60.0);
+    let control_marker = root_dir.join(".mayfly-clean-ffff00000006");
+    std::fs::write(&control_marker, format!("{}\n", "ab".repeat(16))).unwrap();
+    age_directory(&control_marker, 60.0);
+    let fake = fake_proc_table(
+        &tmp.path().join("fakeproc-standing"),
+        &[(
+            "424242",
+            FakeCmdline::Bytes(b"mayfly-test-unrelated".to_vec()),
+        )],
+    );
+    sweep_orphans_in(&root_dir, &fake);
+    assert!(standing_dir.exists());
+    assert!(kept_marker.exists());
+    assert!(!control_marker.exists());
+}
+
 // ---------- the canonical spelling of the root ----------
 
 #[test]
