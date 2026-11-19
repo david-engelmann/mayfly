@@ -2968,6 +2968,56 @@ fn cli_treats_an_option_shaped_token_after_a_value_option_as_a_missing_value() {
     assert!(glob_run_dirs(tmp.path()).is_empty());
 }
 
+#[test]
+fn cli_refuses_a_bound_option_with_no_value() {
+    // MF-A81. MF-A51's record names the missing value pin
+    // above as the bound family's missing value coverage,
+    // but that pin drives the --root and --allow-env string
+    // arms only, and the bound options ride bound_value,
+    // whose own absence match no drive reached: a bound_value
+    // that defaulted a missing value, or unwrapped it, would
+    // pass every pin. Each bound option stands here in two
+    // shapes, followed by the separator and standing last in
+    // the call, and each refuses at exit 2 with the missing
+    // value sentence naming the option, nothing on standard
+    // output, and nothing prepared under the root.
+    ensure_helper();
+    let tmp = Tmp::new("cli-bound-missing-value");
+    let mut shapes: Vec<Vec<OsString>> = Vec::new();
+    for name in ["--timeout", "--max-cpu", "--max-memory"] {
+        shapes.push(vec![
+            os("run"),
+            os("--root"),
+            tmp.path().as_os_str().to_os_string(),
+            os(name),
+            os("--"),
+            os("/bin/echo"),
+            os("hi"),
+        ]);
+        shapes.push(vec![
+            os("run"),
+            os("--root"),
+            tmp.path().as_os_str().to_os_string(),
+            os(name),
+        ]);
+    }
+    for args in &shapes {
+        let name = args[3].to_string_lossy().into_owned();
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = cli_main(args, &mut out, &mut err);
+        assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
+        assert!(
+            String::from_utf8_lossy(&err)
+                .contains(&format!("mayfly run needs a value after {}", name)),
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        assert!(out.is_empty());
+    }
+    assert!(glob_run_dirs(tmp.path()).is_empty());
+}
+
 // ---------- the init driven directly ----------
 
 fn unshare_path() -> PathBuf {
