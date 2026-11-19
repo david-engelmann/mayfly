@@ -952,6 +952,54 @@ fn cli_reports_a_harness_error_at_125() {
 }
 
 #[test]
+fn cli_with_the_net_flag_shares_the_host_network() {
+    // The library opt in stands pinned on the spec surface
+    // by the_network_opt_in_shares_the_host_network, and
+    // the command line's net flag is the same opt in on the
+    // surface the README demonstrates it on. The token
+    // stands in the suite once elsewhere, as the option
+    // shaped prop of the missing value pin, where the
+    // parser never takes it as the flag. This pin takes it
+    // as the flag, standing before the separator, and reads
+    // the run through the listener the library pin uses.
+    // Against a parser that refuses the flag the drive
+    // answers at 2 with no report and the pin fails on the
+    // exit, and against an arm that takes the flag and
+    // never sets the field the task answers from its fresh
+    // namespace with connected false and the pin fails on
+    // the connection.
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("cli-net-opt-in");
+    let listener = LoopbackListener::start();
+    let mut args = vec![
+        os("run"),
+        os("--root"),
+        tmp.path().as_os_str().to_os_string(),
+        os("--net"),
+        os("--"),
+    ];
+    let mut command = py_cmd(CONNECT_SCRIPT);
+    command.push(os(&listener.port.to_string()));
+    args.extend(command);
+    let result = run_cli(&args, &[]);
+    assert_eq!(result.code, 0);
+    let payload: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(payload["outcome"], "task");
+    let tail = payload["stdout_tail"].as_str().unwrap();
+    let line = tail
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .next_back()
+        .expect("the task printed no json line");
+    let seen: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(seen["connected"], true);
+    assert!(wait_until(|| !listener.received().is_empty(), 3.0));
+    assert_eq!(listener.received(), vec![b"ping".to_vec()]);
+}
+
+#[test]
 fn contract_carries_the_round_one_obligations() {
     let text = std::fs::read_to_string(root().join("CONTRACT.md")).unwrap();
     for number in 1..=13 {
