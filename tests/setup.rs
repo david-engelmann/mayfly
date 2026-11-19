@@ -7,11 +7,14 @@
 //! Rust gate commands of amended obligation S2, and the contract
 //! substance pin asserts the amended S2 phrases.
 
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
+
+mod common;
+
+use common::{mkfifo, root};
 
 const MARKER: &str = "<!-- repo annex below this line -->";
 const GATE_COMMAND: &str = "cargo test";
@@ -19,19 +22,12 @@ const SCAN_COMMAND: &str = "cargo run --bin codepoint_scan";
 const FMT_COMMAND: &str = "cargo fmt --check";
 const CLIPPY_COMMAND: &str = "cargo clippy --all-targets -- -D warnings";
 
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn read(name: &str) -> String {
     std::fs::read_to_string(root().join(name)).unwrap()
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("mayfly-setup-test-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::fresh_dir(tag)
 }
 
 #[test]
@@ -430,12 +426,6 @@ fn codepoint_scan_skips_a_file_with_an_uppercase_binary_suffix() {
     assert_eq!(result.status, 0);
     assert!(result.stdout.contains("em dash U+2014 count 0"));
     assert!(result.stdout.contains("en dash U+2013 count 0"));
-}
-
-fn mkfifo(path: &Path) {
-    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-    let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o666) };
-    assert_eq!(rc, 0, "mkfifo failed for {}", path.display());
 }
 
 fn scan_tree_bounded(root: &Path, timeout_secs: u64) -> ScanOutput {
