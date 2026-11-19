@@ -2916,6 +2916,43 @@ fn cli_reports_a_none_command_element_as_a_harness_error() {
     assert_eq!(payload["task_signal"], serde_json::Value::Null);
 }
 
+struct ReportSinkFails;
+
+impl Write for ReportSinkFails {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "the report reader is gone",
+        ))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn cli_answers_a_harness_error_when_the_report_cannot_be_written() {
+    // The report is the run's one product and the exit code
+    // mirrors it. A writer that refuses every write stands
+    // for a reader that closed the pipe or a target that is
+    // gone, and a run whose task exited 0 must then answer
+    // 125, because the report its code mirrors was never
+    // delivered. Against code that discards the write's
+    // result the call returns the task's 0, and this pin
+    // fails on that code.
+    if !require_sandbox() {
+        return;
+    }
+    ensure_helper();
+    let tmp = Tmp::new("cli-report-sink");
+    let args = cli_args(tmp.path(), &py_cmd("pass"));
+    let mut out = ReportSinkFails;
+    let mut err: Vec<u8> = Vec::new();
+    let code = cli_main(&args, &mut out, &mut err);
+    assert_eq!(code, HARNESS_EXIT_CODE);
+}
+
 #[test]
 fn cli_treats_an_option_shaped_token_after_a_value_option_as_a_missing_value() {
     // The argparse command line of Round 1 refused an option

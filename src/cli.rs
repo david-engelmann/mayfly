@@ -254,7 +254,14 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
         Ok(backend_impl) => backend_impl.run(&spec),
         Err(exc) => RunReport::early_refusal(&backend, command.clone(), exc.0),
     };
-    let _ = writeln!(out, "{}", report.to_json());
+    // The report is the run's one product and the exit code
+    // below mirrors it, so a report that could not be written
+    // was never delivered and the mirror has nothing to stand
+    // on. The run answers as a harness error, the code that
+    // already names every other harness failure.
+    if writeln!(out, "{}", report.to_json()).is_err() {
+        return HARNESS_EXIT_CODE;
+    }
     if report.outcome == Outcome::HarnessError {
         return HARNESS_EXIT_CODE;
     }
