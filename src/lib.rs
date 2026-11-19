@@ -313,7 +313,10 @@ pub struct RunReport {
     /// The sandbox directory the run prepared under the root,
     /// named under the root's canonical spelling, so the path
     /// stands resolved wherever the caller's spelling of the
-    /// root was not canonical. Empty on an early refusal.
+    /// root was not canonical. The path is converted to text
+    /// lossily, so a root whose canonical form holds bytes
+    /// that are not valid UTF-8 prints a string that may not
+    /// name the directory. Empty on an early refusal.
     pub sandbox_dir: String,
     /// The command the run carried, as its caller named it.
     pub command: Vec<OsString>,
