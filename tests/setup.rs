@@ -494,3 +494,40 @@ fn codepoint_scan_counts_a_dash_behind_a_symlink_to_a_regular_file() {
     assert_eq!(result.status, 1);
     assert!(result.stdout.contains("em dash U+2014 count 2"));
 }
+
+#[test]
+fn codepoint_scan_does_not_follow_a_symlink_to_a_directory() {
+    // A link whose target is a directory is neither content
+    // nor a door into the tree behind it. The collect rule
+    // takes a regular file, or a link whose target is one,
+    // and the walk descends only into entries whose own type
+    // is a directory, so the link is left whole, exactly as
+    // the scanner's header promises. A walk that descended
+    // through the link would count text standing outside the
+    // tree the caller named, and a link pointing at an
+    // ancestor of itself would walk without bound. A collect
+    // that took the link itself as a file would fail the scan
+    // at exit 2 on a read that cannot start. The first drive
+    // fails on its counts under the descending form and on
+    // its status under the collecting form.
+    let outside = temp_dir("symlink-dir-outside");
+    std::fs::write(outside.join("note.md"), "a\u{2014}b").unwrap();
+    let dir = temp_dir("symlink-dir");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("linked-dir")).unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+    // The control. The same dash standing in a real directory
+    // inside a second root counts once, so the zero behind
+    // the link is the link's doing and not a scan that reads
+    // nothing. A walk that descended nowhere fails here.
+    let control = temp_dir("symlink-dir-control");
+    let inside = control.join("real-dir");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::write(inside.join("note.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree(&control);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 1"));
+}
