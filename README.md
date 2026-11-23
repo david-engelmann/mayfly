@@ -124,6 +124,8 @@ The last line is the shell exit code of that run, printed by echo $? in the same
 
 ## Usage
 
+The backend option names the backend that runs the task. namespace is the only backend and the default. A name no backend is registered under prints the full report as a harness error naming the unknown backend, and the run exits at 125.
+
 ### One run and its report
 
 A run prints one JSON report and nothing else on its own standard output. The task sees the hostname mayfly, starts in a fresh work directory, and runs as root inside the user namespace with an empty capability set, supervised by the init at pid 1. This run asks the task for its hostname, its working directory, and its identity, and the report carries the answers in its stdout_tail field.
@@ -192,7 +194,7 @@ mayfly run --root /tmp/mayfly-runs --net -- /usr/bin/python3 -c "import socket; 
 
 ### Exit codes
 
-The command line exit code states which of three outcomes happened. A task exit code is mirrored exactly, as the quickstart failure shows. A failure before the task starts is a harness error and exits at 125, and its report claims no task exit code. A task killed by a signal exits at 128 plus the signal number, and its report names the signal and claims no exit code. The last line of each block is the shell exit code of that run, printed by echo $? in the same session. A malformed call stands outside the three outcomes. Missing the root, missing the command, or naming an option mayfly does not know exits at 2 with the usage line, and no report is printed.
+The command line exit code states which of three outcomes happened. A task exit code is mirrored exactly, as the quickstart failure shows. A failure before the task starts is a harness error and exits at 125, and its report claims no task exit code. A task killed by a signal exits at 128 plus the signal number, and its report names the signal and claims no exit code. The last line of each block is the shell exit code of that run, printed by echo $? in the same session. A malformed call stands outside the three outcomes. Missing the root or naming an option mayfly does not know exits at 2 with the usage line. Missing the command exits at 2 with its own message and no usage line. No report is printed for any of them.
 
 ```
 mayfly run --root /tmp/mayfly-runs -- /bin/does-not-exist
@@ -391,7 +393,7 @@ The namespace backend works today. A run builds its sandbox, supervises the task
 
 Mayfly is not a micro-VM and there is no hypervisor backend. Isolation rests on Linux namespaces and the prepared root, and a run may carry a wall clock timeout and processor and address space ceilings its caller sets, and slice 1 has no GPU support. A janitor watches for a supervisor that dies without removing its sandbox and removes the directory, and where the janitor dies too the next run under the same root sweeps the directory away before it prepares its own. A removal that does not land leaves the directory standing for the janitor, and the report says so with sandbox_removed set to false. A command killed before its provenance is written can leave an empty sandbox directory standing under the root, and the contract names that residue rather than hiding it. A fresh proc mount inside a user namespace is refused on some machines, and on those machines the prepared root carries an empty proc directory and the report says so. Every capture in this README was taken on such a machine, which is why every report above shows proc_mounted as false.
 
-The contract lives in CONTRACT.md, where the setup obligations S1 to S5 stand beside the full contract that landed with slice 1, obligations MF-1 to MF-12, each stated so it can fail.
+The contract lives in CONTRACT.md, where the setup obligations S1 to S5 stand beside the full contract that landed with slice 1, obligations MF-1 to MF-13, each stated so it can fail.
 
 Closed perfection rounds are 100 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
 
