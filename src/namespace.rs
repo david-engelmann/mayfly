@@ -36,8 +36,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
-    helper_exe, ms_since, now, py_os_error, py_os_error_path, round3, sweep_orphans,
-    write_provenance, Outcome, RunReport, RunSpec, SignalGuard, TailBuffer, Timings,
+    clean_marker_name, helper_exe, ms_since, now, py_os_error, py_os_error_path, round3,
+    run_dir_name, sweep_orphans, write_provenance, Outcome, RunReport, RunSpec, SignalGuard,
+    TailBuffer, Timings,
 };
 
 pub type ProvenanceWriter = dyn Fn(&Path, &str) -> io::Result<()> + Send + Sync;
@@ -412,7 +413,14 @@ impl NamespaceBackend {
             };
             return report;
         }
-        sweep_orphans(&spec.root);
+        // The run's paths are built from the canonical form
+        // of the root it was given, and the sweep below runs
+        // under that same form, so the janitor and the init
+        // name the sandbox under the one spelling the sweep
+        // judges its candidates under, whichever spelling
+        // reached the root here.
+        let root = crate::canonical_root(&spec.root);
+        sweep_orphans(&root);
         let mut timings = Timings::default();
         // The run id and the token are drawn before anything is
         // created under the root, so a failure of the random
@@ -436,8 +444,8 @@ impl NamespaceBackend {
                 return report;
             }
         };
-        let sandbox_dir = spec.root.join(format!("run-{}", run_id));
-        let marker = spec.root.join(format!(".mayfly-clean-{}", run_id));
+        let sandbox_dir = root.join(run_dir_name(&run_id));
+        let marker = root.join(clean_marker_name(&run_id));
         let mut report = RunReport::new(
             self.name(),
             &run_id,
@@ -548,9 +556,7 @@ impl NamespaceBackend {
                     // waiter, so a finished run never leaves the
                     // janitor behind as a zombie in a caller that
                     // lives on past the run.
-                    std::thread::spawn(move || {
-                        let _ = child.wait();
-                    });
+                    reap_detached(child);
                 }
             } else {
                 // The sandbox still stands, so the janitor has
@@ -560,9 +566,7 @@ impl NamespaceBackend {
                 // detached waiter reaps the janitor when it
                 // exits, so a finished run never leaves the
                 // janitor behind as a zombie.
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
+                reap_detached(child);
             }
         }
     }
@@ -862,10 +866,7 @@ impl NamespaceBackend {
             if timed_out {
                 ctx.report.error = Some(timeout_words(ctx.spec.timeout_seconds.unwrap_or(0)));
             } else if ctx.guard.interrupted() && (sig_ts.is_none() || sig_ts.unwrap() <= done_ts) {
-                ctx.report.error = Some(format!(
-                    "the run was interrupted by signal {} and the sandbox was torn down",
-                    ctx.guard.first().unwrap_or(0)
-                ));
+                ctx.report.error = Some(interrupted_words(ctx.guard.first().unwrap_or(0)));
             } else {
                 ctx.report.outcome = Outcome::Task;
                 if let Some(signal) = done.get("signal").and_then(|v| v.as_i64()) {
@@ -889,10 +890,7 @@ impl NamespaceBackend {
                     .unwrap_or(*receipt),
             );
         } else if interrupt_before_deadline {
-            ctx.report.error = Some(format!(
-                "the run was interrupted by signal {} and the sandbox was torn down",
-                ctx.guard.first().unwrap_or(0)
-            ));
+            ctx.report.error = Some(interrupted_words(ctx.guard.first().unwrap_or(0)));
         } else if deadline_ts.is_some() && wait_ended >= deadline_ts.unwrap() {
             // The deadline passed with no task done stamp at or
             // before it and no interrupt received before the
@@ -900,10 +898,7 @@ impl NamespaceBackend {
             // in the timeout words.
             ctx.report.error = Some(timeout_words(ctx.spec.timeout_seconds.unwrap_or(0)));
         } else if ctx.guard.interrupted() {
-            ctx.report.error = Some(format!(
-                "the run was interrupted by signal {} and the sandbox was torn down",
-                ctx.guard.first().unwrap_or(0)
-            ));
+            ctx.report.error = Some(interrupted_words(ctx.guard.first().unwrap_or(0)));
         } else {
             let mut detail = if by_name.contains_key("started") {
                 "the sandbox exited after the task started, and no task end was reported"
@@ -1005,6 +1000,25 @@ fn started_stamp(events: &Arc<Mutex<Vec<(f64, serde_json::Value)>>>) -> Option<f
         }
     }
     None
+}
+
+/// The words a run an interrupt ended answers with, naming
+/// the signal that interrupted it and the teardown that
+/// followed.
+fn interrupted_words(signal: i32) -> String {
+    format!(
+        "the run was interrupted by signal {} and the sandbox was torn down",
+        signal
+    )
+}
+
+/// Reap a child this run does not block on, from a detached
+/// waiter, so a finished run never leaves the child behind
+/// as a zombie in a caller that lives on past the run.
+fn reap_detached(mut child: Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 /// The words a run the timeout ended answers with, naming the

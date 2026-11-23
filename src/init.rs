@@ -287,10 +287,10 @@ fn write_provenance_init(rootfs: &Path) {
         Some(name) => name,
         None => return,
     };
-    if !name.starts_with("run-") {
+    if !name.starts_with(crate::RUN_DIR_PREFIX) {
         return;
     }
-    let run_id = &name["run-".len()..];
+    let run_id = &name[crate::RUN_DIR_PREFIX.len()..];
     let _ = crate::write_provenance(sandbox, run_id);
 }
 
@@ -399,12 +399,8 @@ fn status(status_fd: i32, event: serde_json::Value) {
     }
 }
 
-fn status_event(status_fd: i32, fields: serde_json::Value) {
-    status(status_fd, fields);
-}
-
 fn fail(status_fd: i32, detail: &str) -> i32 {
-    status_event(
+    status(
         status_fd,
         serde_json::json!({"event": "start_error", "detail": detail}),
     );
@@ -501,7 +497,15 @@ fn supervise(
     // The array is owned by this call and holds exactly the two
     // descriptors pipe2 promises to write.
     if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return 1;
+        let errno = errno_now();
+        return fail(
+            status_fd,
+            &format!(
+                "could not start the task, could not create the exec pipe, {} {}",
+                errno,
+                strerror(errno)
+            ),
+        );
     }
     let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
     // Prepare the exec arguments before the fork, so the child
@@ -572,7 +576,15 @@ fn supervise(
         }
     }
     if child < 0 {
-        return 1;
+        let errno = errno_now();
+        return fail(
+            status_fd,
+            &format!(
+                "could not start the task, could not fork the task process, {} {}",
+                errno,
+                strerror(errno)
+            ),
+        );
     }
     drop(argv);
     drop(argv_ptrs);
@@ -614,7 +626,7 @@ fn supervise(
         let report = String::from_utf8_lossy(&report_buf[..read_count as usize]).into_owned();
         return fail(status_fd, &format!("could not start the task, {}", report));
     }
-    status_event(status_fd, serde_json::json!({"event": "started"}));
+    status(status_fd, serde_json::json!({"event": "started"}));
     let mut exit_code: Option<i32> = None;
     let mut signal_no: Option<i32> = None;
     loop {
@@ -651,7 +663,7 @@ fn supervise(
     }
     child_slot.store(0, Ordering::SeqCst);
     if let Some(signal) = signal_no {
-        status_event(
+        status(
             status_fd,
             serde_json::json!({"event": "task_done", "signal": signal}),
         );
@@ -663,7 +675,7 @@ fn supervise(
             "the task vanished before its wait status was read",
         ),
         Some(code) => {
-            status_event(
+            status(
                 status_fd,
                 serde_json::json!({"event": "task_done", "exit_code": code}),
             );
@@ -690,6 +702,54 @@ fn opt_value<'a>(opts: &'a [OsString], name: &str) -> Option<&'a OsString> {
         .and_then(|index| opts.get(index + 1))
 }
 
+/// The named option's value parsed into the type the
+/// caller reads it as, or None where the option stands
+/// absent, its value is not text, or its text does not
+/// parse, the one parse rule every numbered option of
+/// the init is read under.
+fn opt_parsed<T: std::str::FromStr>(opts: &[OsString], name: &str) -> Option<T> {
+    opt_value(opts, name)
+        .and_then(|value| value.to_str())
+        .and_then(|text| text.parse().ok())
+}
+
+/// Write one line to standard error without ever panicking.
+///
+/// The hidden entry points report their refusals and the
+/// assembly drive's failure on standard error, and those
+/// reports are the last thing the process does before it
+/// exits at 1. A print through eprintln! panics when the
+/// write itself fails, on a closed descriptor or a full
+/// disk, and the process then dies at 101 under a panic
+/// message the same broken stream cannot carry, an exit
+/// none of the entry points names. This writes through a
+/// locked handle in the shape the command line's refusals
+/// take and discards the result, so the exit is 1 on a
+/// broken stream as on a sound one.
+fn report_line(text: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{}", text);
+}
+
+/// Whether the caller of one of the hidden entry points
+/// must refuse to run for want of the internal run token,
+/// printing the refusal in the entry point's own name where
+/// it must. The check is the token environment value read
+/// against the token shape, and the two entry points share
+/// this one statement of it.
+fn token_refusal(subcommand: &str) -> bool {
+    match std::env::var(crate::INTERNAL_TOKEN_ENV) {
+        Ok(value) if crate::token_shape_ok(&value) => false,
+        _ => {
+            report_line(&format!(
+                "mayfly {} refuses to run without the internal run token",
+                subcommand
+            ));
+            true
+        }
+    }
+}
+
 /// The init entry point, reached through the hidden __init
 /// subcommand of the mayfly binary with the argv the unshare
 /// call built.
@@ -702,8 +762,9 @@ fn opt_value<'a>(opts: &'a [OsString], name: &str) -> Option<&'a OsString> {
 /// the same guard against accident the drive carries.
 pub fn init_main(args: &[OsString]) -> i32 {
     // The token check stands first, before the death signal
-    // is armed and before anything is attempted, in the shape
-    // the assembly drive's check takes. The init performs the
+    // is armed and before anything is attempted, through the
+    // one check both hidden entry points share. The init
+    // performs the
     // assembly and then sets the hostname, pivots the root,
     // and supervises the command, strictly more than the
     // drive performs on a direct invocation, and the runner's
@@ -713,12 +774,8 @@ pub fn init_main(args: &[OsString]) -> i32 {
     // can arm, assemble, or supervise anything, and the
     // refusal leaves nothing behind, no armed signal, no
     // status event, and nothing created.
-    match std::env::var(crate::INTERNAL_TOKEN_ENV) {
-        Ok(value) if crate::token_shape_ok(&value) => {}
-        _ => {
-            eprintln!("mayfly __init refuses to run without the internal run token");
-            return 1;
-        }
+    if token_refusal("__init") {
+        return 1;
     }
     // Arm the parent death signal before the assembly, so an
     // init whose supervisor dies at any later point in the
@@ -747,10 +804,7 @@ pub fn init_main(args: &[OsString]) -> i32 {
             .iter()
             .position(|arg| arg.as_os_str() == "--")
             .unwrap_or(args.len());
-        return match opt_value(&args[..opts_end], "--status-fd")
-            .and_then(|value| value.to_str())
-            .and_then(|text| text.parse().ok())
-        {
+        return match opt_parsed(&args[..opts_end], "--status-fd") {
             Some(fd) => fail(fd, &detail),
             None => 1,
         };
@@ -765,10 +819,7 @@ pub fn init_main(args: &[OsString]) -> i32 {
         Some(value) => PathBuf::from(value),
         None => return 1,
     };
-    let status_fd: i32 = match opt_value(opts, "--status-fd")
-        .and_then(|value| value.to_str())
-        .and_then(|text| text.parse().ok())
-    {
+    let status_fd: i32 = match opt_parsed(opts, "--status-fd") {
         Some(fd) => fd,
         None => return 1,
     };
@@ -777,12 +828,8 @@ pub fn init_main(args: &[OsString]) -> i32 {
     // caller set the bound. A value that does not read as a
     // count names no ceiling, as an absent option does not,
     // because the supervisor writes only counts it validated.
-    let max_cpu_seconds: Option<u64> = opt_value(opts, "--max-cpu")
-        .and_then(|value| value.to_str())
-        .and_then(|text| text.parse().ok());
-    let max_memory_bytes: Option<u64> = opt_value(opts, "--max-memory")
-        .and_then(|value| value.to_str())
-        .and_then(|text| text.parse().ok());
+    let max_cpu_seconds: Option<u64> = opt_parsed(opts, "--max-cpu");
+    let max_memory_bytes: Option<u64> = opt_parsed(opts, "--max-memory");
     if command.is_empty() {
         return fail(status_fd, "no command was given");
     }
@@ -806,7 +853,7 @@ pub fn init_main(args: &[OsString]) -> i32 {
             return fail(status_fd, &format!("the prepared root failed, {}", detail));
         }
     };
-    status_event(
+    status(
         status_fd,
         serde_json::json!({"event": "ready", "proc_mounted": proc_mounted}),
     );
@@ -829,12 +876,8 @@ pub fn init_main(args: &[OsString]) -> i32 {
 /// assembly needs, so the gate is a guard against accident
 /// and not a boundary, and it is checked before any mount.
 pub fn assemble_root_main(args: &[OsString]) -> i32 {
-    match std::env::var(crate::INTERNAL_TOKEN_ENV) {
-        Ok(value) if crate::token_shape_ok(&value) => {}
-        _ => {
-            eprintln!("mayfly __assemble-root refuses to run without the internal run token");
-            return 1;
-        }
+    if token_refusal("__assemble-root") {
+        return 1;
     }
     let rootfs = match opt_value(args, "--rootfs") {
         Some(value) => PathBuf::from(value),
@@ -843,7 +886,7 @@ pub fn assemble_root_main(args: &[OsString]) -> i32 {
     match assemble_root(&rootfs) {
         Ok(_) => 0,
         Err(detail) => {
-            eprintln!("the prepared root failed, {}", detail);
+            report_line(&format!("the prepared root failed, {}", detail));
             1
         }
     }
