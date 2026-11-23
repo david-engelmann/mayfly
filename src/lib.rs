@@ -23,8 +23,20 @@ use std::sync::{Mutex, OnceLock};
 
 pub use namespace::NamespaceBackend;
 
+/// The exit code a harness error answers at on the command line.
+/// A task exit code is mirrored exactly and a task killed by a
+/// signal answers at 128 plus the signal number. The three can
+/// share a code, since a task can itself exit at 125 or at a
+/// signal's code, so the report, not the code, tells them apart.
 pub const HARNESS_EXIT_CODE: i32 = 125;
+/// The widest tail of one task stream the report carries, in
+/// characters. The tail buffer's text trims its decode to the
+/// last TAIL_CHARS characters.
 pub const TAIL_CHARS: usize = 4000;
+/// The byte bound the tail buffer holds a stream's tail against.
+/// The buffer cuts back to this bound once it stands at twice
+/// it, so the retained window moves about once per bound of new
+/// bytes instead of once per chunk.
 pub const TAIL_BYTES: usize = 1 << 16;
 
 /// The lowest value each bound of MF-13 accepts. A value under
@@ -97,6 +109,10 @@ pub fn py_os_error_path(err: &io::Error, path: &Path) -> String {
     }
 }
 
+/// The message the C library carries for an errno, or an
+/// unknown error line naming the number where it carries none.
+/// This is the text the Python shaped error strings are built
+/// from.
 pub fn strerror(errno: i32) -> String {
     // strerror returns a pointer to a static string or null for
     // an errno it does not know, and the CStr read copies the
@@ -125,10 +141,39 @@ impl std::error::Error for HarnessError {}
 /// One task to run in one fresh sandbox.
 #[derive(Debug, Clone)]
 pub struct RunSpec {
+    /// The command the task runs, its program first, in the form
+    /// the exec receives it.
     pub command: Vec<OsString>,
+    /// The run root the run's sandbox directory is created
+    /// under, and the directory the orphan sweep reads before
+    /// the run prepares its own. The root is read under its
+    /// canonical form, the form canonical_root computes: the
+    /// sandbox directory is created under that spelling, and
+    /// the sweep reads under it, whichever spelling the
+    /// caller handed in.
     pub root: PathBuf,
+    /// The caller environment keys the scrub carries into the
+    /// sandbox. RunSpec::new defaults the list to PATH alone.
+    /// Assigning a new list replaces that default whole, while
+    /// pushing a key onto the list keeps PATH beside it. The
+    /// command line replaces the default whole whenever any
+    /// --allow-env key is named, so a caller there who wants a
+    /// key beside PATH names both.
     pub allow_env: Vec<OsString>,
+    /// Whether the task shares the host network. False, the
+    /// default, gives the task a fresh network namespace
+    /// holding only the loopback; true shares the host network.
     pub network: bool,
+    /// Descriptors the caller hands the task across the sandbox
+    /// boundary, kept at their own numbers in the task. The two
+    /// exceptions are the task's own output streams, since the
+    /// runner gives the task its capture pipes at numbers 1 and
+    /// 2, so a descriptor handed over at one of those numbers is
+    /// replaced by the pipe and never reaches the task. This is
+    /// the one caller granted exception to the isolation the
+    /// contract states, named in MF-1. A descriptor handed over
+    /// this way is the caller's own grant to the task and stands
+    /// outside the scrub and the prepared root by that choice.
     pub pass_fds: Vec<std::os::unix::io::RawFd>,
     /// A snapshot of the caller environment the scrub reads, taken
     /// by the caller. Where this is empty the live process
@@ -150,6 +195,9 @@ pub struct RunSpec {
 }
 
 impl RunSpec {
+    /// A spec carrying the defaults, allow_env at PATH alone,
+    /// the network off, no handed descriptors, no caller
+    /// environment snapshot, and no bound of MF-13 set.
     pub fn new(command: Vec<OsString>, root: PathBuf) -> RunSpec {
         RunSpec {
             command,
@@ -255,18 +303,55 @@ impl Outcome {
 /// The record of one run, printed by the command line as json.
 #[derive(Debug, Clone)]
 pub struct RunReport {
+    /// The backend that ran the task, by its registered name.
+    /// On the command line's unknown backend refusal, the name
+    /// the caller asked for, which no backend registered.
     pub backend: String,
+    /// The run's id, drawn for the run. Empty on an early
+    /// refusal.
     pub run_id: String,
+    /// The sandbox directory the run prepared under the root,
+    /// named under the root's canonical spelling, so the path
+    /// stands resolved wherever the caller's spelling of the
+    /// root was not canonical. The path is converted to text
+    /// lossily, so a root whose canonical form holds bytes
+    /// that are not valid UTF-8 prints a string that may not
+    /// name the directory. Empty on an early refusal.
     pub sandbox_dir: String,
+    /// The command the run carried, as its caller named it.
     pub command: Vec<OsString>,
+    /// The run's outcome, a task outcome or a harness error.
     pub outcome: Outcome,
+    /// The task's exit code, where the task ended by exiting.
+    /// On a task outcome exactly one of this field and
+    /// task_signal stands.
     pub task_exit_code: Option<i32>,
+    /// The signal that killed the task, where the task ended
+    /// by a signal. On a task outcome exactly one of this
+    /// field and task_exit_code stands.
     pub task_signal: Option<i32>,
+    /// The harness error's text. None on a task outcome, and
+    /// None too on a harness error the run could not name, as
+    /// where the wait on the sandbox child itself failed.
     pub error: Option<String>,
+    /// Whether a fresh proc was mounted in the prepared root.
+    /// Some on every report a backend returns, and false on
+    /// an early refusal.
     pub proc_mounted: Option<bool>,
+    /// Whether the sandbox directory stands removed at the
+    /// report's end. Some on every report a backend returns,
+    /// and true on an early refusal, where none was created.
     pub sandbox_removed: Option<bool>,
+    /// The run's phase timings. The total stands Some on
+    /// every report a backend returns, refusals included, and
+    /// None on the command line's unknown backend refusal,
+    /// which no backend answered.
     pub timings_ms: Timings,
+    /// The tail of the task's standard output, kept to the
+    /// harness's tail bound.
     pub stdout_tail: String,
+    /// The tail of the task's standard error, kept to the
+    /// harness's tail bound.
     pub stderr_tail: String,
 }
 
@@ -293,6 +378,23 @@ impl RunReport {
             stdout_tail: String::new(),
             stderr_tail: String::new(),
         }
+    }
+
+    /// The report of a run refused before anything was
+    /// prepared. No run id and no sandbox directory stand on
+    /// it, the error is set, no proc is mounted, and the
+    /// sandbox stands recorded as removed because none was
+    /// created. The backend's bound refusal and random draw
+    /// refusal and the command line's unknown backend refusal
+    /// all answer with this shape, and a caller whose refusal
+    /// still measures the run's total time sets that timing
+    /// on the report it gets back.
+    pub fn early_refusal(backend: &str, command: Vec<OsString>, error: String) -> RunReport {
+        let mut report = RunReport::new(backend, "", "", command, Outcome::HarnessError);
+        report.error = Some(error);
+        report.proc_mounted = Some(false);
+        report.sandbox_removed = Some(true);
+        report
     }
 
     pub fn to_json(&self) -> String {
@@ -496,11 +598,21 @@ pub fn get_backend(name: &str) -> Result<NamespaceBackend, HarnessError> {
     }
 }
 
+/// The names get_backend resolves, in registry order. The two
+/// move together, so a backend that joins the registry joins this
+/// list in the same change, and a name that leaves the one
+/// leaves the other.
 pub fn backend_names() -> Vec<&'static str> {
     vec!["namespace"]
 }
 
-/// The runner entry point the command line and the tests share.
+/// Run one task on the backend a name resolves to, with a
+/// default spec, no bound of MF-13 set and no caller
+/// environment keys carried over, the limitation MF-A15
+/// records. The command line does not use this entry, because
+/// it sets the bounds and the allow list its own caller named
+/// on its spec, and the test suite drives the backend
+/// directly.
 pub fn run_task(
     command: Vec<OsString>,
     root: &Path,
@@ -516,6 +628,11 @@ pub fn run_task(
 /// this at the built binary once, through set_helper_exe.
 static HELPER_EXE: OnceLock<PathBuf> = OnceLock::new();
 
+/// The mayfly binary the backend re-invokes for its init and
+/// janitor. It is the path set_helper_exe set where a harness set
+/// one, and this process's own executable path where none did,
+/// falling back to the name mayfly where that path cannot be
+/// read.
 pub fn helper_exe() -> PathBuf {
     if let Some(path) = HELPER_EXE.get() {
         return path.clone();
@@ -523,11 +640,50 @@ pub fn helper_exe() -> PathBuf {
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mayfly"))
 }
 
+/// Point helper_exe at the built mayfly binary, for a test
+/// harness whose own executable is not that binary. The
+/// setting takes once, and a later call is silently refused, the
+/// once contract the suite relies on.
 pub fn set_helper_exe(path: &Path) {
     let _ = HELPER_EXE.set(path.to_path_buf());
 }
 
+/// The name of the provenance file standing inside every
+/// sandbox directory, carrying the id of the run that created
+/// the directory. The orphan sweep trusts a directory whose
+/// provenance names the directory's own run id, an
+/// identification the sweep's own doc bounds.
 pub const PROVENANCE_NAME: &str = ".mayfly-provenance";
+
+/// The prefix every run directory's name carries, the run
+/// id standing after it. The runner builds the directory's
+/// name from the id under this prefix, and the sweep and
+/// the init read the id back out of the name, so the shape
+/// is stated here once and every seat that builds or parses
+/// the name takes it from this statement.
+pub const RUN_DIR_PREFIX: &str = "run-";
+/// The prefix every clean marker's name carries, the run
+/// id standing after it, under the same rule as the run
+/// directory's prefix. The runner and the sweep build the
+/// marker's name from the id, and the sweep reads the id
+/// back out of it.
+pub const CLEAN_MARKER_PREFIX: &str = ".mayfly-clean-";
+
+/// The name of the sandbox directory a run with this id
+/// stands under its root.
+pub fn run_dir_name(run_id: &str) -> String {
+    format!("{}{}", RUN_DIR_PREFIX, run_id)
+}
+
+/// The name of the clean marker a run with this id leaves
+/// beside its root.
+pub fn clean_marker_name(run_id: &str) -> String {
+    format!("{}{}", CLEAN_MARKER_PREFIX, run_id)
+}
+/// The byte bound the provenance read accumulates against. A
+/// provenance standing past it reads as no provenance at all,
+/// so an oversize file planted at the path names nothing the
+/// sweep can trust.
 pub const PROVENANCE_READ_LIMIT: usize = 4096;
 
 /// The environment key the supervisor uses to hand the per run
@@ -536,9 +692,10 @@ pub const PROVENANCE_READ_LIMIT: usize = 4096;
 /// the environment the supervisor builds is scrubbed to the
 /// allowlist and the init removes this key from its own
 /// environment before it supervises the task. The hidden
-/// assembly entry point refuses to run without a value of the
-/// token shape under this key, so it cannot be invoked directly
-/// on a host by accident and perform its mounts there.
+/// assembly entry point and the init refuse to run without
+/// a value of the token shape under this key, so neither can
+/// be invoked directly on a host by accident and perform its
+/// mounts there.
 pub const INTERNAL_TOKEN_ENV: &str = "MAYFLY_INTERNAL_TOKEN";
 
 /// Whether a value has the shape of a per run token, thirty two
@@ -639,12 +796,41 @@ pub fn write_provenance(sandbox_dir: &Path, run_id: &str) -> io::Result<()> {
 /// over. A read refused for any other reason also makes the
 /// answer None, because the one entry withheld may be the one
 /// that names the path.
-pub fn pids_referencing_in(proc_dir: &Path, path: &Path) -> Option<Vec<u32>> {
-    let needle = path.as_os_str().as_bytes();
-    let mut found = Vec::new();
+/// One reading of a process table: the command line of every
+/// process in it that could be read, by pid. The orphan sweep
+/// reads the table once and tests every candidate against this
+/// one reading, so a sweep over k stale candidates pays one
+/// table scan instead of k. The reading is None in exactly the
+/// shapes where a scan's answer is unknown: a table that
+/// cannot be listed, a listing that fails part way, a command
+/// line read refused for any reason but a process vanishing
+/// between the listing and the read, and a table in which not
+/// one command line could be read at all.
+struct ProcTable {
+    lines: Vec<(u32, Vec<u8>)>,
+}
+
+impl ProcTable {
+    /// The pids in this reading whose command line names the
+    /// given path. The naming is byte for byte: the path's
+    /// bytes, in the spelling the caller built it with, must
+    /// stand somewhere in the command line's bytes, so a
+    /// process that names the same directory under another
+    /// spelling of it is not seen by this reading.
+    fn referencing(&self, path: &Path) -> Vec<u32> {
+        let needle = path.as_os_str().as_bytes();
+        self.lines
+            .iter()
+            .filter(|(_, cmdline)| contains_subslice(cmdline, needle))
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+}
+
+fn read_proc_table(proc_dir: &Path) -> Option<ProcTable> {
+    let mut lines: Vec<(u32, Vec<u8>)> = Vec::new();
     let entries = std::fs::read_dir(proc_dir).ok()?;
     let own = std::process::id();
-    let mut reads = 0usize;
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
@@ -664,26 +850,34 @@ pub fn pids_referencing_in(proc_dir: &Path, path: &Path) -> Option<Vec<u32>> {
         }
         let cmdline_path = entry.path().join("cmdline");
         match std::fs::read(&cmdline_path) {
-            Ok(cmdline) => {
-                reads += 1;
-                if contains_subslice(&cmdline, needle) {
-                    found.push(pid);
-                }
-            }
+            Ok(cmdline) => lines.push((pid, cmdline)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(_) => return None,
         }
     }
-    if reads == 0 {
+    if lines.is_empty() {
         return None;
     }
-    Some(found)
+    Some(ProcTable { lines })
 }
 
+/// The pids whose command lines in the process table at
+/// proc_dir name path, or None where that table could not be
+/// read whole. The None is load bearing. It says liveness is
+/// unknown, where Some of an empty list says the table read
+/// clean and nothing live names the path.
+pub fn pids_referencing_in(proc_dir: &Path, path: &Path) -> Option<Vec<u32>> {
+    read_proc_table(proc_dir).map(|table| table.referencing(path))
+}
+
+/// pids_referencing_in against the live process table at
+/// /proc.
 pub fn pids_referencing(path: &Path) -> Option<Vec<u32>> {
     pids_referencing_in(Path::new("/proc"), path)
 }
 
+/// Whether needle stands anywhere in haystack, byte for byte.
+/// An empty needle stands in every haystack.
 pub fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
@@ -696,6 +890,66 @@ pub fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+/// The canonical form of a run root, the one spelling
+/// every seat that builds or judges a path under the root
+/// agrees on.
+///
+/// The walk climbs from the root toward the filesystem
+/// root until a prefix of it canonicalizes, and the
+/// components below that prefix are then applied to the
+/// canonical form in order: a plain name is joined, a
+/// current directory reference is skipped, and a parent
+/// reference removes the last component standing. A
+/// parent reference names the same directory the kernel
+/// would reach at every step it is applied, because the
+/// component it removes either does not stand yet, which
+/// the failed canonicalizations on the climb proved of
+/// it, or stands inside a canonical prefix, which
+/// carries no links for it to resolve through. A root
+/// under parents a runner is about to create therefore
+/// takes the canonical spelling whole, and the tail the
+/// runner then creates is canonical by construction. A
+/// root that reaches no canonicalizable prefix at all
+/// keeps the spelling it was given.
+pub fn canonical_root(root: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut suffix: Vec<Component> = Vec::new();
+    let mut cursor = root;
+    let mut resolved = loop {
+        if let Ok(prefix) = std::fs::canonicalize(cursor) {
+            break prefix;
+        }
+        match cursor.components().next_back() {
+            Some(component @ (Component::Normal(_) | Component::ParentDir | Component::CurDir)) => {
+                suffix.push(component);
+                match cursor.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => cursor = parent,
+                    _ if cursor != Path::new(".") => cursor = Path::new("."),
+                    _ => return root.to_path_buf(),
+                }
+            }
+            _ => return root.to_path_buf(),
+        }
+    };
+    for component in suffix.iter().rev() {
+        match component {
+            Component::Normal(name) => resolved.push(name),
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            _ => {}
+        }
+    }
+    resolved
+}
+
+/// The seconds a sandbox directory must stand untouched
+/// before the orphan sweep will judge it. The grace alone
+/// does not keep a run being prepared safe from the sweep.
+/// Once it has passed, the sweep spares a judged directory
+/// only while a live process names it, as the run's janitor
+/// does from its spawn, so a run whose janitor did not start
+/// can still be swept once the grace has passed.
 pub const ORPHAN_GRACE_SECONDS: f64 = 5.0;
 
 /// Remove sandbox directories under root whose runs are dead.
@@ -707,18 +961,36 @@ pub const ORPHAN_GRACE_SECONDS: f64 = 5.0;
 /// identification that guards against accidental collision
 /// and name confusion and is not authentication and no
 /// boundary against a writer to the run root, and only when it is
-/// older than the grace period, so a run still being prepared
-/// by a concurrent process is never touched, and only when no
-/// live process names it, so a live run of any age keeps its
-/// sandbox. A directory position is judged by the entry standing
+/// older than the grace period, which keeps a young directory
+/// from judgment and no more, and only when no live process
+/// names it in the one reading of the process table the sweep
+/// judges against, so a live run named in that reading keeps
+/// its sandbox at any age. Past the grace a run still being
+/// prepared is kept safe by that naming alone, as its janitor
+/// names its directory from its spawn, and a run whose janitor
+/// did not start, or had not started when the reading was
+/// taken, can still be swept once the grace has passed.
+/// The naming that judgement rests on is byte for byte,
+/// and both sides of it are built under one spelling of the
+/// root. The candidates here are built from the canonical
+/// form of the root this invocation was handed, and the
+/// runner builds every run's sandbox path from that same
+/// canonical form, so a live run's processes name its
+/// directory in the spelling the candidate carries,
+/// whichever spelling either invocation reached the root
+/// by. A directory position is judged by the entry standing
 /// there itself and never through a link it may be, so a symlink
 /// planted at a run directory position is neither read through
 /// nor removed, because the sweep never decides from data
 /// outside the run root. Where the process table cannot be listed, liveness
-/// is unknown and nothing is swept. A clean marker whose run
+/// is unknown and nothing is swept. The liveness of every
+/// candidate in one sweep is judged against a single reading
+/// of the process table, taken when the first candidate is
+/// judged. A clean marker whose run
 /// directory is already gone is swept on the same terms. A
 /// sweep failure never breaks the run that triggered it.
 pub fn sweep_orphans_in(root: &Path, proc_dir: &Path) {
+    let root = &canonical_root(root);
     let entries: Vec<PathBuf> = match std::fs::read_dir(root) {
         Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
         Err(_) => return,
@@ -727,12 +999,23 @@ pub fn sweep_orphans_in(root: &Path, proc_dir: &Path) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
+    // The table is read once, when the first candidate reaches
+    // the liveness check, and every candidate in the sweep is
+    // judged against that one reading. A sweep whose root
+    // holds no stale candidate never reads the table at all.
+    let mut table: Option<Option<ProcTable>> = None;
     for entry in entries {
-        sweep_one(root, proc_dir, &entry, now_secs);
+        sweep_one(root, proc_dir, &entry, now_secs, &mut table);
     }
 }
 
-fn sweep_one(root: &Path, proc_dir: &Path, entry: &Path, now_secs: f64) {
+fn sweep_one(
+    root: &Path,
+    proc_dir: &Path,
+    entry: &Path,
+    now_secs: f64,
+    table: &mut Option<Option<ProcTable>>,
+) {
     let name = match entry.file_name().and_then(|n| n.to_str()) {
         Some(n) => n.to_string(),
         None => return,
@@ -743,7 +1026,7 @@ fn sweep_one(root: &Path, proc_dir: &Path, entry: &Path, now_secs: f64) {
     let is_real_dir = std::fs::symlink_metadata(entry)
         .map(|meta| meta.file_type().is_dir())
         .unwrap_or(false);
-    if is_real_dir && name.starts_with("run-") {
+    if is_real_dir && name.starts_with(RUN_DIR_PREFIX) {
         let mtime = match entry.metadata().and_then(|m| m.modified()) {
             Ok(t) => t
                 .duration_since(std::time::UNIX_EPOCH)
@@ -754,20 +1037,21 @@ fn sweep_one(root: &Path, proc_dir: &Path, entry: &Path, now_secs: f64) {
         if now_secs - mtime < ORPHAN_GRACE_SECONDS {
             return;
         }
-        let run_id = &name["run-".len()..];
+        let run_id = &name[RUN_DIR_PREFIX.len()..];
         if read_provenance(entry).as_deref() != Some(run_id) {
             return;
         }
-        match pids_referencing_in(proc_dir, entry) {
+        let snapshot = table.get_or_insert_with(|| read_proc_table(proc_dir));
+        match snapshot.as_ref().map(|t| t.referencing(entry)) {
             None => return,
             Some(pids) if !pids.is_empty() => return,
             _ => {}
         }
         let _ = std::fs::remove_dir_all(entry);
-        let marker = root.join(format!(".mayfly-clean-{}", run_id));
+        let marker = root.join(clean_marker_name(run_id));
         let _ = std::fs::remove_file(marker);
-    } else if entry.is_file() && name.starts_with(".mayfly-clean-") {
-        let run_dir = root.join(format!("run-{}", &name[".mayfly-clean-".len()..]));
+    } else if entry.is_file() && name.starts_with(CLEAN_MARKER_PREFIX) {
+        let run_dir = root.join(run_dir_name(&name[CLEAN_MARKER_PREFIX.len()..]));
         if run_dir.exists() {
             return;
         }
@@ -785,6 +1069,9 @@ fn sweep_one(root: &Path, proc_dir: &Path, entry: &Path, now_secs: f64) {
     }
 }
 
+/// sweep_orphans_in against the live process table at /proc.
+/// Every run calls this on its root before it prepares its
+/// own sandbox.
 pub fn sweep_orphans(root: &Path) {
     sweep_orphans_in(root, Path::new("/proc"));
 }
@@ -975,6 +1262,9 @@ pub fn current_env() -> Vec<(OsString, OsString)> {
     std::env::vars_os().collect()
 }
 
+/// The value standing under key in an environment list, the
+/// first standing where a key stands twice, or None where it
+/// does not stand.
 pub fn env_lookup<'a>(env: &'a [(OsString, OsString)], key: &OsStr) -> Option<&'a OsStr> {
     env.iter()
         .find(|(k, _)| k.as_os_str() == key)
