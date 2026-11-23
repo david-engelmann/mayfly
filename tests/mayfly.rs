@@ -927,6 +927,46 @@ fn cli_reports_a_harness_error_at_125() {
 }
 
 #[test]
+fn cli_passes_two_named_allow_env_keys_to_the_task() {
+    // MF-A82. The README states that keys named with
+    // repeated allow-env flags pass through with their
+    // values, and its own demonstration names two keys in
+    // one call. The library pins drive a two key allow list
+    // through the spec field, which bypasses the parser, and
+    // the fake unshare drives pass one flag each, so no
+    // command line drive passed two: a parser that replaced
+    // the list instead of accumulating would drop the first
+    // named key and every pin would still pass. Both keys
+    // stand named here, and the task's environment carries
+    // both lines.
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("cli-allow-env-two");
+    let mut args = vec![
+        os("run"),
+        os("--root"),
+        tmp.path().as_os_str().to_os_string(),
+        os("--allow-env"),
+        os("PATH"),
+        os("--allow-env"),
+        os("MAYFLY_KEEP_ME"),
+        os("--"),
+    ];
+    args.extend_from_slice(&cmd(&["/usr/bin/env"]));
+    let result = run_cli(
+        &args,
+        &[("MAYFLY_KEEP_ME".to_string(), "a kept value".to_string())],
+    );
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    let payload: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(payload["outcome"], "task");
+    let tail = payload["stdout_tail"].as_str().unwrap();
+    assert!(tail.contains("PATH="), "{}", tail);
+    assert!(tail.contains("MAYFLY_KEEP_ME=a kept value"), "{}", tail);
+}
+
+#[test]
 fn cli_with_the_net_flag_shares_the_host_network() {
     // The library opt in stands pinned on the spec surface
     // by the_network_opt_in_shares_the_host_network, and
