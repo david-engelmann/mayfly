@@ -27,7 +27,7 @@ use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant};
 
@@ -37,9 +37,10 @@ use mayfly::{
     RunReport, RunSpec, HARNESS_EXIT_CODE, TAIL_CHARS,
 };
 
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
+mod common;
+
+use common::{mkfifo, parse_env_output, root, Tmp};
+use common::{PHASE_NAMES, REPORT_FIELDS};
 
 fn mayfly_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mayfly"))
@@ -66,31 +67,6 @@ static PY: LazyLock<PathBuf> = LazyLock::new(|| {
 
 fn py() -> OsString {
     PY.clone().into_os_string()
-}
-
-static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-struct Tmp(PathBuf);
-
-impl Tmp {
-    fn new(tag: &str) -> Tmp {
-        let n = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir =
-            std::env::temp_dir().join(format!("mayfly-test-{}-{}-{}", std::process::id(), n, tag));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Tmp(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 
 fn os(text: &str) -> OsString {
@@ -303,8 +279,14 @@ fn unique_hex() -> String {
 
 const FORCE_REFUSAL_SWITCH: &str = "MAYFLY_TEST_FORCE_SANDBOX_REFUSAL";
 
-fn probe_failure_is_host_refusal(report: &RunReport) -> bool {
-    let text = [
+/// The probe's one reading of a failed run's text. The
+/// report's error and its stderr tail, in that order, with
+/// empty parts dropped, joined by a single space. The
+/// classification reads the text lowercased and the refusal
+/// the probe hands back reads it trimmed, and both read the
+/// same text because both answer from the same failure.
+fn report_text(report: &RunReport) -> String {
+    [
         report.error.clone().unwrap_or_default(),
         report.stderr_tail.clone(),
     ]
@@ -312,7 +294,10 @@ fn probe_failure_is_host_refusal(report: &RunReport) -> bool {
     .filter(|part| !part.is_empty())
     .collect::<Vec<_>>()
     .join(" ")
-    .to_lowercase();
+}
+
+fn probe_failure_is_host_refusal(report: &RunReport) -> bool {
+    let text = report_text(report).to_lowercase();
     if text.contains("uid_map") {
         return true;
     }
@@ -346,16 +331,7 @@ fn probe_core(runner: &dyn Fn(Vec<OsString>, &Path) -> RunReport) -> (bool, Stri
     if report.outcome == Outcome::Task {
         return (true, String::new());
     }
-    let refusal = [
-        report.error.clone().unwrap_or_default(),
-        report.stderr_tail.clone(),
-    ]
-    .into_iter()
-    .filter(|part| !part.is_empty())
-    .collect::<Vec<_>>()
-    .join(" ")
-    .trim()
-    .to_string();
+    let refusal = report_text(&report).trim().to_string();
     if probe_failure_is_host_refusal(&report) {
         (
             false,
@@ -658,12 +634,7 @@ fn the_environment_is_scrubbed_to_the_allowlist() {
         (os("MAYFLY_KEEP_ME"), os("a kept value")),
     ];
     let report = run_task_spec(&task_spec);
-    let mut seen: BTreeMap<String, String> = BTreeMap::new();
-    for line in report.stdout_tail.trim().lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            seen.insert(key.to_string(), value.to_string());
-        }
-    }
+    let seen = parse_env_output(&report.stdout_tail);
     let expected: BTreeMap<String, String> = [
         ("PATH".to_string(), "/usr/bin:/bin".to_string()),
         ("MAYFLY_KEEP_ME".to_string(), "a kept value".to_string()),
@@ -756,9 +727,13 @@ fn no_process_from_the_task_tree_survives_teardown() {
 
 #[test]
 fn no_sandbox_mount_appears_in_the_host_mount_table() {
+    if !require_sandbox() {
+        return;
+    }
     let tmp = Tmp::new("mount-table");
     let before = std::fs::read_to_string("/proc/self/mounts").unwrap();
     let report = run_task(py_cmd("pass"), tmp.path());
+    assert_eq!(report.outcome, Outcome::Task);
     let after = std::fs::read_to_string("/proc/self/mounts").unwrap();
     assert!(!before.contains(&report.sandbox_dir));
     assert!(!after.contains(&report.sandbox_dir));
@@ -1017,12 +992,7 @@ fn an_allowlisted_coercion_key_keeps_the_caller_value() {
         (os("PYTHONCOERCECLOCALE"), os("caller-chosen")),
     ];
     let report = run_task_spec(&task_spec);
-    let mut seen: BTreeMap<String, String> = BTreeMap::new();
-    for line in report.stdout_tail.trim().lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            seen.insert(key.to_string(), value.to_string());
-        }
-    }
+    let seen = parse_env_output(&report.stdout_tail);
     assert_eq!(
         seen.get("PYTHONCOERCECLOCALE").map(|s| s.as_str()),
         Some("caller-chosen")
@@ -1181,7 +1151,7 @@ fn a_prepare_failure_report_carries_the_full_shape() {
     assert_eq!(report.proc_mounted, Some(false));
     assert!(report.sandbox_removed.is_some());
     let json = report.to_json();
-    for phase in ["prepare", "start", "task", "teardown", "total"] {
+    for phase in PHASE_NAMES {
         assert!(json.contains(&format!("\"{}\"", phase)), "{}", phase);
     }
 }
@@ -1950,12 +1920,6 @@ fn run_task_on_a_thread(
     (rx, handle)
 }
 
-fn mkfifo(path: &Path) {
-    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-    let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o666) };
-    assert_eq!(rc, 0, "mkfifo failed for {}", path.display());
-}
-
 #[test]
 fn a_fifo_at_the_provenance_path_neither_hangs_nor_breaks_the_run() {
     if !require_sandbox() {
@@ -2296,6 +2260,191 @@ fn one_sweep_answers_each_candidate_from_the_one_table() {
     assert!(!unreferenced.exists());
 }
 
+#[test]
+fn the_sweep_keeps_each_candidate_inside_its_grace_period() {
+    // MF-12 states the sweep's terms as a conjunction, and one
+    // term is that a candidate is swept only when it is older
+    // than the grace period. Every other sweep pin ages its
+    // candidates past the grace before it drives the sweep, so
+    // the age term is the one term no pin discriminated: a
+    // sweep that dropped both age returns would judge a
+    // directory created a moment ago, in the segment between
+    // its creation and its janitor's spawn where MF-12 names
+    // no other protection, and every standing pin would still
+    // pass. Four candidates stand here against a table that
+    // reads clean and names nothing: a young run directory
+    // whose provenance names it, that shape aged past the
+    // grace, a young clean marker whose run directory is gone,
+    // and that marker aged. The young candidates stand and
+    // the aged ones are swept, so this pin fails on a sweep
+    // missing its age term on the young assertions and on a
+    // sweep that removes nothing on the aged ones.
+    let tmp = Tmp::new("sweep-grace");
+    let root_dir = tmp.path().join("root");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let young_dir = root_dir.join("run-ffff00000001");
+    std::fs::create_dir_all(&young_dir).unwrap();
+    std::fs::write(young_dir.join(".mayfly-provenance"), "ffff00000001\n").unwrap();
+    let aged_dir = plant_sweepable(&root_dir, "ffff00000002");
+    let young_marker = root_dir.join(".mayfly-clean-ffff00000003");
+    std::fs::write(&young_marker, format!("{}\n", "ab".repeat(16))).unwrap();
+    let aged_marker = root_dir.join(".mayfly-clean-ffff00000004");
+    std::fs::write(&aged_marker, format!("{}\n", "ab".repeat(16))).unwrap();
+    age_directory(&aged_marker, 60.0);
+    let fake = fake_proc_table(
+        &tmp.path().join("fakeproc-grace"),
+        &[(
+            "424242",
+            FakeCmdline::Bytes(b"mayfly-test-unrelated".to_vec()),
+        )],
+    );
+    sweep_orphans_in(&root_dir, &fake);
+    assert!(young_dir.exists());
+    assert!(!aged_dir.exists());
+    assert!(young_marker.exists());
+    assert!(!aged_marker.exists());
+}
+
+// ---------- the canonical spelling of the root ----------
+
+#[test]
+fn the_sweep_judges_a_candidate_under_the_canonical_spelling_of_its_root() {
+    // The sweep's liveness judgement is a byte comparison,
+    // and the two sides of it are built under one spelling
+    // of the root. A candidate stands under a root whose
+    // canonical spelling the planted command line names,
+    // and the sweep is driven through a symlinked spelling
+    // of that same root. A sweep that built its candidates
+    // from the spelling it was handed would test the link's
+    // bytes against the canonical bytes the command line
+    // carries, see no naming, and remove a directory whose
+    // run the table names as live. The second candidate,
+    // which no command line names, is the control: it is
+    // swept under either spelling, so the pin also fails on
+    // a sweep that removes nothing.
+    let tmp = Tmp::new("sweep-spelling");
+    let real_root = tmp.path().join("real-root");
+    std::fs::create_dir_all(&real_root).unwrap();
+    let canonical = mayfly::canonical_root(&real_root);
+    let named = plant_sweepable(&canonical, "eeee0000000c");
+    let unnamed = plant_sweepable(&canonical, "eeee0000000d");
+    let link_root = tmp.path().join("link-root");
+    std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+    let fake = fake_proc_table(
+        &tmp.path().join("fakeproc-spelling"),
+        &[(
+            "424242",
+            FakeCmdline::Bytes(named.as_os_str().as_bytes().to_vec()),
+        )],
+    );
+    sweep_orphans_in(&link_root, &fake);
+    assert!(named.exists());
+    assert!(!unnamed.exists());
+}
+
+#[test]
+fn a_run_under_a_symlinked_root_spelling_reports_the_canonical_sandbox_dir() {
+    // The runner builds its sandbox path from the canonical
+    // form of the root it was given, so every process the
+    // run spawns names the one spelling the sweep judges
+    // under. A run handed its root through a symlink must
+    // therefore report its sandbox directory under the
+    // canonical spelling, not the link's. Against a runner
+    // that built from the given spelling the report names
+    // the link's path and this pin fails on the comparison.
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("canonical-root-run");
+    let real_root = tmp.path().join("real-root");
+    std::fs::create_dir_all(&real_root).unwrap();
+    let link_root = tmp.path().join("link-root");
+    std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+    let report = run_task(py_cmd("pass"), &link_root);
+    assert_eq!(report.outcome, Outcome::Task);
+    let canonical = mayfly::canonical_root(&real_root);
+    assert_eq!(
+        report.sandbox_dir,
+        format!("{}/run-{}", canonical.display(), report.run_id)
+    );
+    assert_eq!(report.sandbox_removed, Some(true));
+}
+
+#[test]
+fn canonical_root_resolves_the_standing_prefix_and_keeps_the_missing_tail() {
+    // The canonical form is taken from the deepest prefix
+    // that stands, with the tail that does not stand yet
+    // joined verbatim behind it, so a root under parents
+    // the runner is about to create still resolves to the
+    // one spelling. A form that canonicalized the whole
+    // root or nothing would fail the first comparison on a
+    // root whose tail is missing, and a form that left a
+    // symlinked prefix unresolved would fail the second.
+    let tmp = Tmp::new("canonical-helper");
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let via_link = link.join("child").join("grandchild");
+    let expected = mayfly::canonical_root(&real)
+        .join("child")
+        .join("grandchild");
+    assert_eq!(mayfly::canonical_root(&via_link), expected);
+    assert_eq!(mayfly::canonical_root(&link), mayfly::canonical_root(&real));
+    // A parent reference over a component that does not
+    // stand cancels that component, because the failed
+    // canonicalizations on the climb prove it is not
+    // there for the kernel to resolve through, and a
+    // current directory reference names the directory it
+    // stands in. A form that fell back to the given
+    // spelling at either shape would hand the runner and
+    // the sweep different spellings of this root once the
+    // missing component's neighbours exist.
+    let through_missing = real.join("missing").join("..").join("child");
+    assert_eq!(
+        mayfly::canonical_root(&through_missing),
+        mayfly::canonical_root(&real).join("child")
+    );
+    let through_dot = real.join(".").join("child");
+    assert_eq!(
+        mayfly::canonical_root(&through_dot),
+        mayfly::canonical_root(&real).join("child")
+    );
+}
+
+#[test]
+fn a_run_under_a_root_spelled_through_a_missing_parent_reports_the_canonical_sandbox_dir() {
+    // The runner's half of the same shape at the run
+    // level. The root reaches the runner spelled through
+    // a component that does not stand, cancelled by a
+    // parent reference behind it. The sandbox directory
+    // the run reports must stand under the canonical
+    // spelling the sweep will judge under once the run's
+    // own creation has made the root's neighbours stand,
+    // because a later sweep canonicalizes the root it is
+    // handed and a report, a janitor, and an init naming
+    // the spelled form would name a directory that
+    // sweep's candidates never carry. Against a runner
+    // that kept the given spelling for this root the
+    // report names the spelled path and this pin fails
+    // on the comparison.
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("canonical-root-dotdot");
+    let base = tmp.path().join("base");
+    std::fs::create_dir_all(&base).unwrap();
+    let spelled = base.join("missing").join("..").join("runs");
+    let report = run_task(py_cmd("pass"), &spelled);
+    assert_eq!(report.outcome, Outcome::Task);
+    let canonical = mayfly::canonical_root(&base).join("runs");
+    assert_eq!(
+        report.sandbox_dir,
+        format!("{}/run-{}", canonical.display(), report.run_id)
+    );
+    assert_eq!(report.sandbox_removed, Some(true));
+}
+
 // ---------- the fake unshare interrupt protocol ----------
 
 const FAKE_UNSHARE: &str = r#"#!/usr/bin/env python3
@@ -2321,7 +2470,7 @@ def note(name):
         handle.write("noted\n")
 
 
-emit({"event": "ready", "proc_mounted": False})
+emit({"event": "ready", "proc_mounted": mode == "proc-mounted"})
 emit({"event": "started"})
 note("fake-started")
 if mode == "late-done":
@@ -2463,6 +2612,50 @@ fn an_interrupt_after_the_task_done_stamp_keeps_the_task_outcome() {
 }
 
 #[test]
+fn the_report_carries_the_proc_mounted_answer_of_the_ready_event() {
+    // The report records whether a fresh proc was mounted
+    // in the prepared root, and the runner takes that answer
+    // from the ready event the init reports. On the hosts
+    // the fleet gates on the mount stands refused inside a
+    // user namespace, so no real run can stage the true arm,
+    // and the fake unshare is the one seam that can stage
+    // the event's value at will: its proc-mounted mode
+    // reports proc_mounted true on its ready event and
+    // takes the standing done shape otherwise. This pin
+    // drives the command line through the fake in that mode
+    // and in the standing done-early mode and reads the
+    // printed report's field in both directions. Against a
+    // runner that ignores the ready event's field and lets
+    // the backstop in run answer everywhere, the true arm
+    // fails, and against one that inverts the field both
+    // arms fail.
+    let tmp = Tmp::new("fake-proc-mounted");
+    for (mode, expected) in [("proc-mounted", true), ("done-early", false)] {
+        let root_dir = tmp.path().join(format!("root-{mode}"));
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let fakebin = tmp.path().join(format!("fakebin-{mode}"));
+        let mut proc = start_cli_with_fake_unshare(&root_dir, &fakebin, mode);
+        let noted = wait_until(
+            || {
+                glob_run_dirs(&root_dir)
+                    .iter()
+                    .any(|dir| dir.join("fake-done").exists())
+            },
+            30.0,
+        );
+        assert!(noted, "the fake sandbox never reported its task done");
+        signal_child(&proc, libc::SIGTERM);
+        let (code, out) = communicate(&mut proc, 30.0);
+        assert_eq!(code, 0, "{}", mode);
+        let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(payload["outcome"], "task", "{}", mode);
+        assert_eq!(payload["proc_mounted"], expected, "{}", mode);
+        assert!(glob_run_dirs(&root_dir).is_empty());
+        assert!(glob_clean_markers(&root_dir).is_empty());
+    }
+}
+
+#[test]
 fn a_held_status_pipe_costs_the_run_no_descriptor() {
     // A fake unshare whose own process exits at once while a
     // forked child holds the status pipe open for eight
@@ -2520,6 +2713,76 @@ fn a_held_status_pipe_costs_the_run_no_descriptor() {
         let rc = unsafe { libc::fcntl(sentinel.as_raw_fd(), libc::F_GETFD) };
         assert!(rc != -1, "a sentinel descriptor was closed under the test");
     }
+}
+
+const FAKE_UNSHARE_NOFORK: &str = r#"#!/usr/bin/env python3
+import os
+import sys
+
+argv = sys.argv[1:]
+index = argv.index("__init")
+argv[index - 1] = "{SHIM}"
+os.execve("{UNSHARE}", ["{UNSHARE}"] + argv, os.environ)
+"#;
+
+const INIT_SHIM_NOFORK: &str = r#"#!/usr/bin/env python3
+import os
+import resource
+import sys
+
+limits = resource.getrlimit(resource.RLIMIT_NPROC)
+resource.setrlimit(resource.RLIMIT_NPROC, (0, limits[1]))
+os.execve("{HELPER}", ["{HELPER}"] + sys.argv[1:], os.environ)
+"#;
+
+fn write_fake_unshare_nofork(fakebin: &Path) -> PathBuf {
+    std::fs::create_dir_all(fakebin).unwrap();
+    let shim = fakebin.join("init-shim");
+    let shim_text = INIT_SHIM_NOFORK
+        .replacen("#!/usr/bin/env python3", &format!("#!{}", PY.display()), 1)
+        .replace("{HELPER}", &mayfly_bin().display().to_string());
+    std::fs::write(&shim, shim_text).unwrap();
+    let fake_text = FAKE_UNSHARE_NOFORK
+        .replacen("#!/usr/bin/env python3", &format!("#!{}", PY.display()), 1)
+        .replace("{SHIM}", &shim.display().to_string())
+        .replace("{UNSHARE}", &unshare_path().display().to_string());
+    let fake = fakebin.join("unshare");
+    std::fs::write(&fake, fake_text).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fake
+}
+
+#[test]
+fn an_init_whose_fork_fails_reports_the_errno_it_met() {
+    // The fake unshare execs the real unshare with a shim
+    // standing where the init stands. The shim sets the
+    // process count limit to zero in its own process and
+    // execs the real init, so the init assembles its root
+    // and then meets a fork that fails with EAGAIN at the
+    // entry of supervise. The report must carry that errno
+    // in the start error words. Against an init that
+    // returns from that seat in silence, the report carries
+    // the runner's generic fallback instead, and this pin
+    // fails on the words.
+    if !require_sandbox() {
+        return;
+    }
+    ensure_helper();
+    let tmp = Tmp::new("init-fork-fails");
+    let fake = write_fake_unshare_nofork(&tmp.path().join("fakebin"));
+    let root_dir = tmp.path().join("root");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let backend = NamespaceBackend::with_unshare_path(Some(fake));
+    let report = backend.run(&spec(py_cmd("pass"), &root_dir));
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("could not start the task, could not fork the task process, 11 Resource temporarily unavailable")
+    );
+    assert_eq!(report.task_exit_code, None);
+    assert!(glob_run_dirs(&root_dir).is_empty());
 }
 
 #[test]
@@ -2628,7 +2891,7 @@ fn a_slow_janitor_on_the_clean_path_is_reaped_by_a_detached_waiter() {
         assert!(reaped, "the janitor's process table entry never cleared");
         return;
     }
-    eprintln!("no attempt staged a slow janitor, so the reaping pin did not engage");
+    panic!("no attempt staged a slow janitor, so the reaping pin did not engage");
 }
 
 // ---------- commands no exec can carry ----------
@@ -2687,6 +2950,43 @@ fn cli_reports_a_none_command_element_as_a_harness_error() {
     assert_eq!(payload["task_signal"], serde_json::Value::Null);
 }
 
+struct ReportSinkFails;
+
+impl Write for ReportSinkFails {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "the report reader is gone",
+        ))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn cli_answers_a_harness_error_when_the_report_cannot_be_written() {
+    // The report is the run's one product and the exit code
+    // mirrors it. A writer that refuses every write stands
+    // for a reader that closed the pipe or a target that is
+    // gone, and a run whose task exited 0 must then answer
+    // 125, because the report its code mirrors was never
+    // delivered. Against code that discards the write's
+    // result the call returns the task's 0, and this pin
+    // fails on that code.
+    if !require_sandbox() {
+        return;
+    }
+    ensure_helper();
+    let tmp = Tmp::new("cli-report-sink");
+    let args = cli_args(tmp.path(), &py_cmd("pass"));
+    let mut out = ReportSinkFails;
+    let mut err: Vec<u8> = Vec::new();
+    let code = cli_main(&args, &mut out, &mut err);
+    assert_eq!(code, HARNESS_EXIT_CODE);
+}
+
 #[test]
 fn cli_treats_an_option_shaped_token_after_a_value_option_as_a_missing_value() {
     // The argparse command line of Round 1 refused an option
@@ -2737,6 +3037,57 @@ fn cli_treats_an_option_shaped_token_after_a_value_option_as_a_missing_value() {
         assert!(out.is_empty());
     }
     assert!(glob_run_dirs(tmp.path()).is_empty());
+}
+
+#[test]
+fn cli_refuses_the_malformed_call_shapes_at_2() {
+    // The missing value refusal is pinned, and the bound
+    // refusals are pinned in their own entries. The four
+    // dispatch refusals stood in no pin: no arguments and a
+    // wrong subcommand answer the usage line alone, an
+    // unknown option and a missing root answer their
+    // sentence with the usage line, and a missing command
+    // answers its sentence alone. The unknown option arm is
+    // the load bearing one, because it is what keeps a
+    // hyphen led token in option position from falling
+    // through to the arm that takes the rest of the line as
+    // the command and runs it.
+    ensure_helper();
+    let tmp = Tmp::new("cli-malformed");
+    let usage = "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--net] [--timeout SECONDS] [--max-cpu SECONDS] [--max-memory BYTES] -- COMMAND...\n";
+    let root = tmp.path().as_os_str().to_os_string();
+    let shapes: Vec<(Vec<OsString>, String)> = vec![
+        (vec![], usage.to_string()),
+        (vec![os("bogus")], usage.to_string()),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root.clone(),
+                os("--bogus"),
+                os("--"),
+                os("/bin/true"),
+            ],
+            format!("mayfly run does not know the option --bogus\n{}", usage),
+        ),
+        (
+            vec![os("run"), os("--"), os("/bin/true")],
+            format!("mayfly run needs a --root directory\n{}", usage),
+        ),
+        (
+            vec![os("run"), os("--root"), root, os("--")],
+            "mayfly run needs a command after --\n".to_string(),
+        ),
+    ];
+    for (args, expected) in shapes {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = cli_main(&args, &mut out, &mut err);
+        assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
+        assert_eq!(String::from_utf8(err).unwrap(), expected);
+        assert!(out.is_empty());
+    }
+    assert!(dir_names(tmp.path()).is_empty());
 }
 
 // ---------- the init driven directly ----------
@@ -3909,34 +4260,14 @@ fn an_unbounded_runs_report_stands_as_landed() {
         .keys()
         .map(|key| key.as_str())
         .collect();
-    assert_eq!(
-        fields,
-        vec![
-            "backend",
-            "run_id",
-            "sandbox_dir",
-            "command",
-            "outcome",
-            "task_exit_code",
-            "task_signal",
-            "error",
-            "proc_mounted",
-            "sandbox_removed",
-            "timings_ms",
-            "stdout_tail",
-            "stderr_tail",
-        ]
-    );
+    assert_eq!(fields, REPORT_FIELDS);
     let timing_fields: Vec<&str> = payload["timings_ms"]
         .as_object()
         .unwrap()
         .keys()
         .map(|key| key.as_str())
         .collect();
-    assert_eq!(
-        timing_fields,
-        vec!["prepare", "start", "task", "teardown", "total"]
-    );
+    assert_eq!(timing_fields, PHASE_NAMES);
     assert_eq!(payload["backend"], "namespace");
     assert_eq!(
         payload["command"],
@@ -3958,7 +4289,7 @@ fn an_unbounded_runs_report_stands_as_landed() {
         payload["sandbox_dir"],
         serde_json::json!(format!("{}/run-{}", tmp.path().display(), run_id))
     );
-    for phase in ["prepare", "start", "task", "teardown", "total"] {
+    for phase in PHASE_NAMES {
         assert!(
             payload["timings_ms"][phase].is_number(),
             "the {} timing did not stand as a number",
@@ -4006,24 +4337,7 @@ fn cli_unknown_backend_reports_the_full_report_shape() {
         .keys()
         .map(|key| key.as_str())
         .collect();
-    assert_eq!(
-        fields,
-        vec![
-            "backend",
-            "run_id",
-            "sandbox_dir",
-            "command",
-            "outcome",
-            "task_exit_code",
-            "task_signal",
-            "error",
-            "proc_mounted",
-            "sandbox_removed",
-            "timings_ms",
-            "stdout_tail",
-            "stderr_tail",
-        ]
-    );
+    assert_eq!(fields, REPORT_FIELDS);
     assert_eq!(payload["backend"], "nosuch");
     assert_eq!(payload["run_id"], "");
     assert_eq!(payload["sandbox_dir"], "");
@@ -4039,4 +4353,91 @@ fn cli_unknown_backend_reports_the_full_report_shape() {
     assert_eq!(payload["sandbox_removed"], true);
     assert_eq!(payload["stdout_tail"], "");
     assert_eq!(payload["stderr_tail"], "");
+}
+
+#[test]
+fn the_report_writer_escapes_non_ascii_and_control_text_the_python_way() {
+    // Every string in a printed report passes through the
+    // one JSON writer, whose stated contract is the Python
+    // harness's escaping, every non-ascii character written
+    // as a unicode escape. The suite's other report pins
+    // parse the printed JSON back into values, and parsing
+    // cannot tell the escaped form from the raw character,
+    // so the writer's branches stood unexercised. This pin
+    // reads the printed text itself for a tail carrying one
+    // character per branch.
+    let mut report = RunReport::new(
+        "namespace",
+        "abcdef012345",
+        "/nonexistent",
+        cmd(&["/bin/echo"]),
+        Outcome::Task,
+    );
+    report.stdout_tail = "caf\u{e9} \u{20ac} \u{1f600} \u{1} \"quoted\" back\\slash\n".to_string();
+    let printed = report.to_json();
+    for escaped in [
+        "caf\\u00e9",
+        "\\u20ac",
+        "\\ud83d\\ude00",
+        "\\u0001",
+        "\\\"quoted\\\"",
+        "back\\\\slash",
+        "slash\\n",
+    ] {
+        assert!(printed.contains(escaped), "{}", escaped);
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&printed).unwrap();
+    assert_eq!(parsed["stdout_tail"], report.stdout_tail);
+}
+
+#[test]
+fn backend_names_names_exactly_the_backends_get_backend_resolves() {
+    // The registry's enumeration and its lookup must move
+    // together, as backend_names' own doc states. A name
+    // added to the list, dropped from it, or renamed on
+    // either side leaves the enumeration misstating the
+    // registry it enumerates, and no other pin reads the
+    // enumeration at all. The one form this pin cannot see
+    // is a name added to the lookup alone, which no finite
+    // probe of the list can enumerate; that form stands
+    // guarded by the doc itself and by the second backend
+    // event MF-A14 waits on, when an addition must land on
+    // both sides at once. The list stands at exactly the
+    // one registered name, and every name it carries
+    // resolves through get_backend to a backend reporting
+    // that same name.
+    let names = mayfly::backend_names();
+    assert_eq!(names, vec!["namespace"]);
+    for name in &names {
+        let backend = mayfly::get_backend(name).unwrap();
+        assert_eq!(backend.name(), *name);
+    }
+}
+
+#[test]
+fn the_report_writer_prints_a_whole_float_with_its_decimal_point() {
+    // py_float prints a float the way Python prints one in
+    // json output, with a trailing .0 on a whole value and
+    // the shortest round trip decimal otherwise. Every pin
+    // that reads a report parses the printed json back into
+    // values, and parsing cannot tell 104 from 104.0, while
+    // a consumer shaped like the Python harness the writer
+    // mirrors can tell them apart at once. A writer that
+    // dropped the decimal point would reshape every report
+    // whose timing lands on a whole millisecond, and this
+    // pin is what fails there, at the function itself and
+    // through one report's printed text.
+    assert_eq!(mayfly::py_float(104.0), "104.0");
+    assert_eq!(mayfly::py_float(0.5), "0.5");
+    assert_eq!(mayfly::py_float(104.36), "104.36");
+    let mut report = RunReport::new(
+        "namespace",
+        "abc000000001",
+        "/root/run-abc000000001",
+        cmd(&["/bin/echo"]),
+        Outcome::Task,
+    );
+    report.timings_ms.total = Some(104.0);
+    let text = report.to_json();
+    assert!(text.contains("\"total\": 104.0"), "{}", text);
 }
