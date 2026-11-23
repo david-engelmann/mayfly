@@ -5,7 +5,8 @@
 //! command line talk only to this interface, so a new backend joins
 //! by registering a name and implementing run. The lifecycle phases
 //! every backend reports timings for are prepare, start, task, and
-//! teardown.
+//! teardown, and every report adds a fifth timing beside them, the
+//! total across the whole run.
 
 pub mod cli;
 pub mod init;
