@@ -4389,3 +4389,55 @@ fn the_report_writer_escapes_non_ascii_and_control_text_the_python_way() {
     let parsed: serde_json::Value = serde_json::from_str(&printed).unwrap();
     assert_eq!(parsed["stdout_tail"], report.stdout_tail);
 }
+
+#[test]
+fn backend_names_names_exactly_the_backends_get_backend_resolves() {
+    // The registry's enumeration and its lookup must move
+    // together, as backend_names' own doc states. A name
+    // added to the list, dropped from it, or renamed on
+    // either side leaves the enumeration misstating the
+    // registry it enumerates, and no other pin reads the
+    // enumeration at all. The one form this pin cannot see
+    // is a name added to the lookup alone, which no finite
+    // probe of the list can enumerate; that form stands
+    // guarded by the doc itself and by the second backend
+    // event MF-A14 waits on, when an addition must land on
+    // both sides at once. The list stands at exactly the
+    // one registered name, and every name it carries
+    // resolves through get_backend to a backend reporting
+    // that same name.
+    let names = mayfly::backend_names();
+    assert_eq!(names, vec!["namespace"]);
+    for name in &names {
+        let backend = mayfly::get_backend(name).unwrap();
+        assert_eq!(backend.name(), *name);
+    }
+}
+
+#[test]
+fn the_report_writer_prints_a_whole_float_with_its_decimal_point() {
+    // py_float prints a float the way Python prints one in
+    // json output, with a trailing .0 on a whole value and
+    // the shortest round trip decimal otherwise. Every pin
+    // that reads a report parses the printed json back into
+    // values, and parsing cannot tell 104 from 104.0, while
+    // a consumer shaped like the Python harness the writer
+    // mirrors can tell them apart at once. A writer that
+    // dropped the decimal point would reshape every report
+    // whose timing lands on a whole millisecond, and this
+    // pin is what fails there, at the function itself and
+    // through one report's printed text.
+    assert_eq!(mayfly::py_float(104.0), "104.0");
+    assert_eq!(mayfly::py_float(0.5), "0.5");
+    assert_eq!(mayfly::py_float(104.36), "104.36");
+    let mut report = RunReport::new(
+        "namespace",
+        "abc000000001",
+        "/root/run-abc000000001",
+        cmd(&["/bin/echo"]),
+        Outcome::Task,
+    );
+    report.timings_ms.total = Some(104.0);
+    let text = report.to_json();
+    assert!(text.contains("\"total\": 104.0"), "{}", text);
+}
