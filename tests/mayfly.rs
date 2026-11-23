@@ -727,9 +727,13 @@ fn no_process_from_the_task_tree_survives_teardown() {
 
 #[test]
 fn no_sandbox_mount_appears_in_the_host_mount_table() {
+    if !require_sandbox() {
+        return;
+    }
     let tmp = Tmp::new("mount-table");
     let before = std::fs::read_to_string("/proc/self/mounts").unwrap();
     let report = run_task(py_cmd("pass"), tmp.path());
+    assert_eq!(report.outcome, Outcome::Task);
     let after = std::fs::read_to_string("/proc/self/mounts").unwrap();
     assert!(!before.contains(&report.sandbox_dir));
     assert!(!after.contains(&report.sandbox_dir));
