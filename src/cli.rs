@@ -4,8 +4,13 @@
 //! command in a fresh sandbox under that root, prints the run
 //! report as json, and exits with the task exit code. A harness
 //! error exits at 125 and a task killed by a signal exits at
-//! 128 plus the signal number, so the three outcomes are never
-//! confused with each other.
+//! 128 plus the signal number. The exit code alone does not
+//! always tell the three outcomes apart, because a task can
+//! itself exit at 125 or at a signal's code. The report is
+//! what separates them there. Its outcome field tells a
+//! harness error from a task outcome, and its task_signal
+//! and task_exit_code fields tell a signal death from an
+//! exit at the same code.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -255,16 +260,16 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
     spec.max_memory_bytes = max_memory_bytes;
     let report = match get_backend(&backend) {
         Ok(backend_impl) => backend_impl.run(&spec),
-        Err(exc) => {
-            let mut report =
-                RunReport::new(&backend, "", "", command.clone(), Outcome::HarnessError);
-            report.error = Some(exc.0);
-            report.proc_mounted = Some(false);
-            report.sandbox_removed = Some(true);
-            report
-        }
+        Err(exc) => RunReport::early_refusal(&backend, command.clone(), exc.0),
     };
-    let _ = writeln!(out, "{}", report.to_json());
+    // The report is the run's one product and the exit code
+    // below mirrors it, so a report that could not be written
+    // was never delivered and the mirror has nothing to stand
+    // on. The run answers as a harness error, the code that
+    // already names every other harness failure.
+    if writeln!(out, "{}", report.to_json()).is_err() {
+        return HARNESS_EXIT_CODE;
+    }
     if report.outcome == Outcome::HarnessError {
         return HARNESS_EXIT_CODE;
     }

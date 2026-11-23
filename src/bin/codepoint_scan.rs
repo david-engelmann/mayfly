@@ -26,8 +26,12 @@
 //! collected, and neither is a link whose target is not a
 //! regular file, so debris standing in a scanned tree can
 //! neither hang the scan on a read that never ends nor fail it
-//! on a read that cannot start.
+//! on a read that cannot start. A write of the scan's own
+//! output that fails is a scan error at exit 2 in the same
+//! voice, because a scan that cannot report its counts has
+//! not completed.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -94,7 +98,7 @@ fn collect(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), ScanError> {
     Ok(())
 }
 
-fn scan(root: &Path) -> Result<(usize, usize), ScanError> {
+fn scan(root: &Path, out: &mut dyn Write) -> Result<(usize, usize), ScanError> {
     let mut files = Vec::new();
     collect(root, &mut files)?;
     let mut em_count = 0;
@@ -108,7 +112,12 @@ fn scan(root: &Path) -> Result<(usize, usize), ScanError> {
         let file_em = text.matches(EM_DASH).count();
         let file_en = text.matches(EN_DASH).count();
         if file_em > 0 || file_en > 0 {
-            println!("{}: em dash {file_em}, en dash {file_en}", path.display());
+            writeln!(
+                out,
+                "{}: em dash {file_em}, en dash {file_en}",
+                path.display()
+            )
+            .map_err(|err| ScanError(format!("cannot write the scan output, {err}")))?;
         }
         em_count += file_em;
         en_count += file_en;
@@ -117,14 +126,21 @@ fn scan(root: &Path) -> Result<(usize, usize), ScanError> {
 }
 
 fn main() -> ExitCode {
-    let root = std::env::args()
+    let root = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    match scan(&root) {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let counted = scan(&root, &mut out).and_then(|(em_count, en_count)| {
+        writeln!(out, "em dash U+2014 count {em_count}")
+            .map_err(|err| ScanError(format!("cannot write the scan output, {err}")))?;
+        writeln!(out, "en dash U+2013 count {en_count}")
+            .map_err(|err| ScanError(format!("cannot write the scan output, {err}")))?;
+        Ok((em_count, en_count))
+    });
+    match counted {
         Ok((em_count, en_count)) => {
-            println!("em dash U+2014 count {em_count}");
-            println!("en dash U+2013 count {en_count}");
             if em_count > 0 || en_count > 0 {
                 ExitCode::from(1)
             } else {
@@ -132,7 +148,9 @@ fn main() -> ExitCode {
             }
         }
         Err(ScanError(message)) => {
-            eprintln!("scan error, {message}");
+            let stderr = std::io::stderr();
+            let mut err_out = stderr.lock();
+            let _ = writeln!(err_out, "scan error, {message}");
             ExitCode::from(2)
         }
     }
