@@ -556,9 +556,7 @@ impl NamespaceBackend {
                     // waiter, so a finished run never leaves the
                     // janitor behind as a zombie in a caller that
                     // lives on past the run.
-                    std::thread::spawn(move || {
-                        let _ = child.wait();
-                    });
+                    reap_detached(child);
                 }
             } else {
                 // The sandbox still stands, so the janitor has
@@ -568,9 +566,7 @@ impl NamespaceBackend {
                 // detached waiter reaps the janitor when it
                 // exits, so a finished run never leaves the
                 // janitor behind as a zombie.
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
+                reap_detached(child);
             }
         }
     }
@@ -870,10 +866,7 @@ impl NamespaceBackend {
             if timed_out {
                 ctx.report.error = Some(timeout_words(ctx.spec.timeout_seconds.unwrap_or(0)));
             } else if ctx.guard.interrupted() && (sig_ts.is_none() || sig_ts.unwrap() <= done_ts) {
-                ctx.report.error = Some(format!(
-                    "the run was interrupted by signal {} and the sandbox was torn down",
-                    ctx.guard.first().unwrap_or(0)
-                ));
+                ctx.report.error = Some(interrupted_words(ctx.guard.first().unwrap_or(0)));
             } else {
                 ctx.report.outcome = Outcome::Task;
                 if let Some(signal) = done.get("signal").and_then(|v| v.as_i64()) {
@@ -897,10 +890,7 @@ impl NamespaceBackend {
                     .unwrap_or(*receipt),
             );
         } else if interrupt_before_deadline {
-            ctx.report.error = Some(format!(
-                "the run was interrupted by signal {} and the sandbox was torn down",
-                ctx.guard.first().unwrap_or(0)
-            ));
+            ctx.report.error = Some(interrupted_words(ctx.guard.first().unwrap_or(0)));
         } else if deadline_ts.is_some() && wait_ended >= deadline_ts.unwrap() {
             // The deadline passed with no task done stamp at or
             // before it and no interrupt received before the
@@ -908,10 +898,7 @@ impl NamespaceBackend {
             // in the timeout words.
             ctx.report.error = Some(timeout_words(ctx.spec.timeout_seconds.unwrap_or(0)));
         } else if ctx.guard.interrupted() {
-            ctx.report.error = Some(format!(
-                "the run was interrupted by signal {} and the sandbox was torn down",
-                ctx.guard.first().unwrap_or(0)
-            ));
+            ctx.report.error = Some(interrupted_words(ctx.guard.first().unwrap_or(0)));
         } else {
             let mut detail = if by_name.contains_key("started") {
                 "the sandbox exited after the task started, and no task end was reported"
@@ -1013,6 +1000,25 @@ fn started_stamp(events: &Arc<Mutex<Vec<(f64, serde_json::Value)>>>) -> Option<f
         }
     }
     None
+}
+
+/// The words a run an interrupt ended answers with, naming
+/// the signal that interrupted it and the teardown that
+/// followed.
+fn interrupted_words(signal: i32) -> String {
+    format!(
+        "the run was interrupted by signal {} and the sandbox was torn down",
+        signal
+    )
+}
+
+/// Reap a child this run does not block on, from a detached
+/// waiter, so a finished run never leaves the child behind
+/// as a zombie in a caller that lives on past the run.
+fn reap_detached(mut child: Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 /// The words a run the timeout ended answers with, naming the

@@ -7,11 +7,14 @@
 //! Rust gate commands of amended obligation S2, and the contract
 //! substance pin asserts the amended S2 phrases.
 
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
+
+mod common;
+
+use common::{mkfifo, root};
 
 const MARKER: &str = "<!-- repo annex below this line -->";
 const GATE_COMMAND: &str = "cargo test";
@@ -19,19 +22,12 @@ const SCAN_COMMAND: &str = "cargo run --bin codepoint_scan";
 const FMT_COMMAND: &str = "cargo fmt --check";
 const CLIPPY_COMMAND: &str = "cargo clippy --all-targets -- -D warnings";
 
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn read(name: &str) -> String {
     std::fs::read_to_string(root().join(name)).unwrap()
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("mayfly-setup-test-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::fresh_dir(tag)
 }
 
 #[test]
@@ -405,6 +401,33 @@ fn codepoint_scan_fails_loudly_on_undecodable_input() {
 }
 
 #[test]
+fn codepoint_scan_reports_a_failed_output_write_as_a_scan_error() {
+    // The scanner's exits are 0, 1, and 2, and a write of
+    // its own output that fails is a scan error at exit 2,
+    // in the same voice as a file that cannot be read.
+    // /dev/full refuses every write, so the first per file
+    // line over a tree carrying one em dash already fails.
+    // Against printing through println! the scanner panics
+    // at exit 101 there, outside its own vocabulary, and
+    // this pin fails on that code.
+    let dir = temp_dir("scan-write-fails");
+    std::fs::write(dir.join("note.md"), "a\u{2014}b").unwrap();
+    let full = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+        .arg(&dir)
+        .stdout(std::process::Stdio::from(full))
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("scan error"));
+}
+
+#[test]
 fn codepoint_scan_counts_a_dash_in_a_file_with_no_suffix() {
     let dir = temp_dir("no-suffix");
     std::fs::write(dir.join("LICENSE"), "a\u{2014}b").unwrap();
@@ -430,12 +453,6 @@ fn codepoint_scan_skips_a_file_with_an_uppercase_binary_suffix() {
     assert_eq!(result.status, 0);
     assert!(result.stdout.contains("em dash U+2014 count 0"));
     assert!(result.stdout.contains("en dash U+2013 count 0"));
-}
-
-fn mkfifo(path: &Path) {
-    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-    let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o666) };
-    assert_eq!(rc, 0, "mkfifo failed for {}", path.display());
 }
 
 fn scan_tree_bounded(root: &Path, timeout_secs: u64) -> ScanOutput {
@@ -493,4 +510,73 @@ fn codepoint_scan_counts_a_dash_behind_a_symlink_to_a_regular_file() {
     let result = scan_tree(&dir);
     assert_eq!(result.status, 1);
     assert!(result.stdout.contains("em dash U+2014 count 2"));
+}
+
+#[test]
+fn codepoint_scan_does_not_follow_a_symlink_to_a_directory() {
+    // A link whose target is a directory is neither content
+    // nor a door into the tree behind it. The collect rule
+    // takes a regular file, or a link whose target is one,
+    // and the walk descends only into entries whose own type
+    // is a directory, so the link is left whole, exactly as
+    // the scanner's header promises. A walk that descended
+    // through the link would count text standing outside the
+    // tree the caller named, and a link pointing at an
+    // ancestor of itself would walk without bound. A collect
+    // that took the link itself as a file would fail the scan
+    // at exit 2 on a read that cannot start. The first drive
+    // fails on its counts under the descending form and on
+    // its status under the collecting form.
+    let outside = temp_dir("symlink-dir-outside");
+    std::fs::write(outside.join("note.md"), "a\u{2014}b").unwrap();
+    let dir = temp_dir("symlink-dir");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("linked-dir")).unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 0, "{}", result.stderr);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+    // The control. The same dash standing in a real directory
+    // inside a second root counts once, so the zero behind
+    // the link is the link's doing and not a scan that reads
+    // nothing. A walk that descended nowhere fails here.
+    let control = temp_dir("symlink-dir-control");
+    let inside = control.join("real-dir");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::write(inside.join("note.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree(&control);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 1"));
+}
+
+#[test]
+fn codepoint_scan_refuses_a_root_that_does_not_stand() {
+    // The scanner's header names a scan root that does not
+    // stand as a scan error at exit 2, one of its deliberate
+    // differences from the scanner it ports, which exited 0
+    // with zero counts. A form that read a missing root as
+    // an empty tree would answer zero counts at exit 0, and
+    // the gate step that runs this scanner over the repo
+    // would report a clean scan of nothing. A regular file
+    // standing as root fails the same directory read and
+    // draws the same answer, with the root named on the
+    // error stream both times.
+    let dir = temp_dir("missing-root");
+    let missing = dir.join("no-such-scan-root");
+    let result = scan_tree(&missing);
+    assert_eq!(result.status, 2);
+    assert!(
+        result.stderr.contains("no-such-scan-root"),
+        "{}",
+        result.stderr
+    );
+    let file_root = dir.join("a-file-not-a-tree");
+    std::fs::write(&file_root, "clean").unwrap();
+    let result = scan_tree(&file_root);
+    assert_eq!(result.status, 2);
+    assert!(
+        result.stderr.contains("a-file-not-a-tree"),
+        "{}",
+        result.stderr
+    );
 }
