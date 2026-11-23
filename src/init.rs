@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
-use crate::{now, py_os_error_path, strerror};
+use crate::{now, py_os_error, py_os_error_path, strerror};
 
 pub const MS_BIND: u64 = 4096;
 pub const MS_REC: u64 = 16384;
@@ -99,11 +99,9 @@ pub fn real_mount(
     };
     if rc != 0 {
         let errno = errno_now();
-        return Err(format!(
-            "[Errno {}] {}: '{}'",
-            errno,
-            strerror(errno),
-            target
+        return Err(py_os_error_path(
+            &io::Error::from_raw_os_error(errno),
+            Path::new(target),
         ));
     }
     Ok(())
@@ -289,10 +287,10 @@ fn write_provenance_init(rootfs: &Path) {
         Some(name) => name,
         None => return,
     };
-    if !name.starts_with("run-") {
+    if !name.starts_with(crate::RUN_DIR_PREFIX) {
         return;
     }
-    let run_id = &name["run-".len()..];
+    let run_id = &name[crate::RUN_DIR_PREFIX.len()..];
     let _ = crate::write_provenance(sandbox, run_id);
 }
 
@@ -316,11 +314,9 @@ pub fn enter_root(rootfs: &Path) -> Result<(), String> {
     let rc = unsafe { libc::syscall(number, new_root.as_ptr(), put_old.as_ptr()) };
     if rc != 0 {
         let errno = errno_now();
-        return Err(format!(
-            "[Errno {}] {}: '{}'",
-            errno,
-            strerror(errno),
-            rootfs_text
+        return Err(py_os_error_path(
+            &io::Error::from_raw_os_error(errno),
+            Path::new(&rootfs_text),
         ));
     }
     std::env::set_current_dir("/").map_err(|err| py_os_error_path(&err, Path::new("/")))?;
@@ -331,10 +327,9 @@ pub fn enter_root(rootfs: &Path) -> Result<(), String> {
     let rc = unsafe { libc::umount2(old.as_ptr(), MNT_DETACH) };
     if rc != 0 {
         let errno = errno_now();
-        return Err(format!(
-            "[Errno {}] {}: '/.oldroot'",
-            errno,
-            strerror(errno)
+        return Err(py_os_error_path(
+            &io::Error::from_raw_os_error(errno),
+            Path::new("/.oldroot"),
         ));
     }
     std::fs::remove_dir("/.oldroot")
@@ -680,7 +675,7 @@ fn set_hostname() -> Result<(), String> {
     let rc = unsafe { libc::sethostname(name.as_ptr(), HOSTNAME.len()) };
     if rc != 0 {
         let errno = errno_now();
-        return Err(format!("[Errno {}] {}", errno, strerror(errno)));
+        return Err(py_os_error(&io::Error::from_raw_os_error(errno)));
     }
     Ok(())
 }
@@ -691,11 +686,66 @@ fn opt_value<'a>(opts: &'a [OsString], name: &str) -> Option<&'a OsString> {
         .and_then(|index| opts.get(index + 1))
 }
 
+/// The named option's value parsed into the type the
+/// caller reads it as, or None where the option stands
+/// absent, its value is not text, or its text does not
+/// parse, the one parse rule every numbered option of
+/// the init is read under.
+fn opt_parsed<T: std::str::FromStr>(opts: &[OsString], name: &str) -> Option<T> {
+    opt_value(opts, name)
+        .and_then(|value| value.to_str())
+        .and_then(|text| text.parse().ok())
+}
+
+/// Write one line to standard error without ever panicking.
+///
+/// The hidden entry points report their refusals and the
+/// assembly drive's failure on standard error, and those
+/// reports are the last thing the process does before it
+/// exits at 1. A print through eprintln! panics when the
+/// write itself fails, on a closed descriptor or a full
+/// disk, and the process then dies at 101 under a panic
+/// message the same broken stream cannot carry, an exit
+/// none of the entry points names. This writes through a
+/// locked handle in the shape the command line's refusals
+/// take and discards the result, so the exit is 1 on a
+/// broken stream as on a sound one.
+fn report_line(text: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{}", text);
+}
+
 /// The init entry point, reached through the hidden __init
 /// subcommand of the mayfly binary with the argv the unshare
 /// call built.
+///
+/// Like the assembly drive it refuses to run unless the
+/// caller presents the internal run token in its environment,
+/// checked before anything is armed or attempted, because a
+/// direct invocation assembles the root and supervises the
+/// command in the caller's own namespaces, and the gate is
+/// the same guard against accident the drive carries.
 pub fn init_main(args: &[OsString]) -> i32 {
-    // Arm the parent death signal before anything else, so an
+    // The token check stands first, before the death signal
+    // is armed and before anything is attempted, in the shape
+    // the assembly drive's check takes. The init performs the
+    // assembly and then sets the hostname, pivots the root,
+    // and supervises the command, strictly more than the
+    // drive performs on a direct invocation, and the runner's
+    // own account of the token names the hidden entry points
+    // in the plural as the children it tells from a direct
+    // caller. A direct caller is therefore refused before it
+    // can arm, assemble, or supervise anything, and the
+    // refusal leaves nothing behind, no armed signal, no
+    // status event, and nothing created.
+    match std::env::var(crate::INTERNAL_TOKEN_ENV) {
+        Ok(value) if crate::token_shape_ok(&value) => {}
+        _ => {
+            report_line("mayfly __init refuses to run without the internal run token");
+            return 1;
+        }
+    }
+    // Arm the parent death signal before the assembly, so an
     // init whose supervisor dies at any later point in the
     // assembly or the supervision dies with it. A failure to
     // arm is an init failure reported like any other, never a
@@ -722,10 +772,7 @@ pub fn init_main(args: &[OsString]) -> i32 {
             .iter()
             .position(|arg| arg.as_os_str() == "--")
             .unwrap_or(args.len());
-        return match opt_value(&args[..opts_end], "--status-fd")
-            .and_then(|value| value.to_str())
-            .and_then(|text| text.parse().ok())
-        {
+        return match opt_parsed(&args[..opts_end], "--status-fd") {
             Some(fd) => fail(fd, &detail),
             None => 1,
         };
@@ -740,10 +787,7 @@ pub fn init_main(args: &[OsString]) -> i32 {
         Some(value) => PathBuf::from(value),
         None => return 1,
     };
-    let status_fd: i32 = match opt_value(opts, "--status-fd")
-        .and_then(|value| value.to_str())
-        .and_then(|text| text.parse().ok())
-    {
+    let status_fd: i32 = match opt_parsed(opts, "--status-fd") {
         Some(fd) => fd,
         None => return 1,
     };
@@ -752,12 +796,8 @@ pub fn init_main(args: &[OsString]) -> i32 {
     // caller set the bound. A value that does not read as a
     // count names no ceiling, as an absent option does not,
     // because the supervisor writes only counts it validated.
-    let max_cpu_seconds: Option<u64> = opt_value(opts, "--max-cpu")
-        .and_then(|value| value.to_str())
-        .and_then(|text| text.parse().ok());
-    let max_memory_bytes: Option<u64> = opt_value(opts, "--max-memory")
-        .and_then(|value| value.to_str())
-        .and_then(|text| text.parse().ok());
+    let max_cpu_seconds: Option<u64> = opt_parsed(opts, "--max-cpu");
+    let max_memory_bytes: Option<u64> = opt_parsed(opts, "--max-memory");
     if command.is_empty() {
         return fail(status_fd, "no command was given");
     }
@@ -807,7 +847,7 @@ pub fn assemble_root_main(args: &[OsString]) -> i32 {
     match std::env::var(crate::INTERNAL_TOKEN_ENV) {
         Ok(value) if crate::token_shape_ok(&value) => {}
         _ => {
-            eprintln!("mayfly __assemble-root refuses to run without the internal run token");
+            report_line("mayfly __assemble-root refuses to run without the internal run token");
             return 1;
         }
     }
@@ -818,7 +858,7 @@ pub fn assemble_root_main(args: &[OsString]) -> i32 {
     match assemble_root(&rootfs) {
         Ok(_) => 0,
         Err(detail) => {
-            eprintln!("the prepared root failed, {}", detail);
+            report_line(&format!("the prepared root failed, {}", detail));
             1
         }
     }
