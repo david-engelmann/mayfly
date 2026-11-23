@@ -36,8 +36,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
-    helper_exe, ms_since, now, py_os_error, py_os_error_path, round3, strerror, sweep_orphans,
-    write_provenance, Outcome, RunReport, RunSpec, SignalGuard, TailBuffer, Timings,
+    clean_marker_name, helper_exe, ms_since, now, py_os_error, py_os_error_path, round3,
+    run_dir_name, sweep_orphans, write_provenance, Outcome, RunReport, RunSpec, SignalGuard,
+    TailBuffer, Timings,
 };
 
 pub type ProvenanceWriter = dyn Fn(&Path, &str) -> io::Result<()> + Send + Sync;
@@ -405,23 +406,21 @@ impl NamespaceBackend {
         // line refuses the same values at parse time in its own
         // class and never reaches this answer.
         if let Some(error) = bound_breach(spec) {
-            let mut report = RunReport::new(
-                self.name(),
-                "",
-                "",
-                spec.command.clone(),
-                Outcome::HarnessError,
-            );
-            report.error = Some(error);
-            report.proc_mounted = Some(false);
-            report.sandbox_removed = Some(true);
+            let mut report = RunReport::early_refusal(self.name(), spec.command.clone(), error);
             report.timings_ms = Timings {
                 total: Some(ms_since(wall)),
                 ..Timings::default()
             };
             return report;
         }
-        sweep_orphans(&spec.root);
+        // The run's paths are built from the canonical form
+        // of the root it was given, and the sweep below runs
+        // under that same form, so the janitor and the init
+        // name the sandbox under the one spelling the sweep
+        // judges its candidates under, whichever spelling
+        // reached the root here.
+        let root = crate::canonical_root(&spec.root);
+        sweep_orphans(&root);
         let mut timings = Timings::default();
         // The run id and the token are drawn before anything is
         // created under the root, so a failure of the random
@@ -435,23 +434,18 @@ impl NamespaceBackend {
         let (run_id, token) = match drawn {
             Ok(pair) => pair,
             Err(err) => {
-                let mut report = RunReport::new(
+                let mut report = RunReport::early_refusal(
                     self.name(),
-                    "",
-                    "",
                     spec.command.clone(),
-                    Outcome::HarnessError,
+                    format!("prepare failed, {}", py_os_error(&err)),
                 );
-                report.error = Some(format!("prepare failed, {}", py_os_error(&err)));
-                report.proc_mounted = Some(false);
-                report.sandbox_removed = Some(true);
                 timings.total = Some(ms_since(wall));
                 report.timings_ms = timings;
                 return report;
             }
         };
-        let sandbox_dir = spec.root.join(format!("run-{}", run_id));
-        let marker = spec.root.join(format!(".mayfly-clean-{}", run_id));
+        let sandbox_dir = root.join(run_dir_name(&run_id));
+        let marker = root.join(clean_marker_name(&run_id));
         let mut report = RunReport::new(
             self.name(),
             &run_id,
@@ -692,7 +686,7 @@ impl NamespaceBackend {
                 close_fd(status_w);
                 ctx.report.error = Some(format!(
                     "could not launch unshare, {}",
-                    spawn_error_text(&err, &program)
+                    py_os_error_path(&err, Path::new(program.as_os_str()))
                 ));
                 self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, None);
                 return;
@@ -1035,18 +1029,6 @@ fn timeout_words(seconds: u64) -> String {
         "the task did not finish within the timeout of {} seconds and the sandbox was torn down",
         seconds
     )
-}
-
-fn spawn_error_text(err: &io::Error, program: &OsString) -> String {
-    match err.raw_os_error() {
-        Some(errno) => format!(
-            "[Errno {}] {}: '{}'",
-            errno,
-            strerror(errno),
-            program.to_string_lossy()
-        ),
-        None => err.to_string(),
-    }
 }
 
 fn drain_status(fd: RawFd, events: &Arc<Mutex<Vec<(f64, serde_json::Value)>>>) {
