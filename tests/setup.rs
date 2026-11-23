@@ -548,3 +548,35 @@ fn codepoint_scan_does_not_follow_a_symlink_to_a_directory() {
     assert_eq!(result.status, 1);
     assert!(result.stdout.contains("em dash U+2014 count 1"));
 }
+
+#[test]
+fn codepoint_scan_refuses_a_root_that_does_not_stand() {
+    // The scanner's header names a scan root that does not
+    // stand as a scan error at exit 2, one of its deliberate
+    // differences from the scanner it ports, which exited 0
+    // with zero counts. A form that read a missing root as
+    // an empty tree would answer zero counts at exit 0, and
+    // the gate step that runs this scanner over the repo
+    // would report a clean scan of nothing. A regular file
+    // standing as root fails the same directory read and
+    // draws the same answer, with the root named on the
+    // error stream both times.
+    let dir = temp_dir("missing-root");
+    let missing = dir.join("no-such-scan-root");
+    let result = scan_tree(&missing);
+    assert_eq!(result.status, 2);
+    assert!(
+        result.stderr.contains("no-such-scan-root"),
+        "{}",
+        result.stderr
+    );
+    let file_root = dir.join("a-file-not-a-tree");
+    std::fs::write(&file_root, "clean").unwrap();
+    let result = scan_tree(&file_root);
+    assert_eq!(result.status, 2);
+    assert!(
+        result.stderr.contains("a-file-not-a-tree"),
+        "{}",
+        result.stderr
+    );
+}
