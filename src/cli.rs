@@ -4,8 +4,13 @@
 //! command in a fresh sandbox under that root, prints the run
 //! report as json, and exits with the task exit code. A harness
 //! error exits at 125 and a task killed by a signal exits at
-//! 128 plus the signal number, so the three outcomes are never
-//! confused with each other.
+//! 128 plus the signal number. The exit code alone does not
+//! always tell the three outcomes apart, because a task can
+//! itself exit at 125 or at a signal's code. The report is
+//! what separates them there. Its outcome field tells a
+//! harness error from a task outcome, and its task_signal
+//! and task_exit_code fields tell a signal death from an
+//! exit at the same code.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -27,7 +32,13 @@ const USAGE: &str = "usage: mayfly run --root DIR [--backend NAME] [--allow-env 
 /// is the words the floor refusal carries for this bound. A
 /// bound that carries a ceiling refuses a value over it in
 /// the same class, in the words of its bound, and a bound
-/// with no ceiling passes none.
+/// with no ceiling passes none. A value written in digits
+/// alone that stands past the widest count the parser
+/// carries is still a whole count, so the whole count
+/// refusal would be false for it; it refuses in range words
+/// instead, the ceiling words of its bound where the bound
+/// carries a ceiling and a widest count refusal where it
+/// carries none.
 fn bound_value(
     value: Option<OsString>,
     name: &str,
@@ -43,9 +54,31 @@ fn bound_value(
             return Err(2);
         }
     };
-    let parsed: u64 = match value.to_string_lossy().parse() {
+    let text = value.to_string_lossy();
+    let parsed: u64 = match text.parse() {
         Ok(parsed) => parsed,
         Err(_) => {
+            if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+                // The value reads as a whole count and stands
+                // past the widest count the parser carries, so
+                // the whole count words would be false for it.
+                // It refuses in range words instead.
+                if let Some(ceiling) = ceiling {
+                    let _ = writeln!(
+                        err,
+                        "mayfly run needs {} of at most {} seconds",
+                        name, ceiling
+                    );
+                } else {
+                    let _ = writeln!(
+                        err,
+                        "mayfly run needs a value after {} no larger than {}",
+                        name,
+                        u64::MAX
+                    );
+                }
+                return Err(2);
+            }
             let _ = writeln!(err, "mayfly run needs a whole number after {}", name);
             return Err(2);
         }
@@ -219,14 +252,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
     spec.max_memory_bytes = max_memory_bytes;
     let report = match get_backend(&backend) {
         Ok(backend_impl) => backend_impl.run(&spec),
-        Err(exc) => {
-            let mut report =
-                RunReport::new(&backend, "", "", command.clone(), Outcome::HarnessError);
-            report.error = Some(exc.0);
-            report.proc_mounted = Some(false);
-            report.sandbox_removed = Some(true);
-            report
-        }
+        Err(exc) => RunReport::early_refusal(&backend, command.clone(), exc.0),
     };
     // The report is the run's one product and the exit code
     // below mirrors it, so a report that could not be written
