@@ -100,6 +100,23 @@ fn bound_value(
     Ok(parsed)
 }
 
+/// Read one valued string option in the refusal class the
+/// command line uses for a missing value. The bound options
+/// read through bound_value in this same shape, a helper
+/// returning the value or the exit code after writing its
+/// refusal; the string options read through here, and the
+/// refusal is the one sentence every valued option answers
+/// with where its value is missing or option shaped.
+fn string_value(value: Option<OsString>, name: &str, err: &mut dyn Write) -> Result<OsString, i32> {
+    match value {
+        Some(value) => Ok(value),
+        None => {
+            let _ = writeln!(err, "mayfly run needs a value after {}", name);
+            Err(2)
+        }
+    }
+}
+
 /// The command line entry point. The argument list excludes the
 /// program name. Output goes to the two writers, and the return
 /// value is the process exit code.
@@ -140,32 +157,23 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
         }
         match text.as_str() {
             "--root" => {
-                match option_value(rest, index) {
-                    Some(value) => root = Some(PathBuf::from(value)),
-                    None => {
-                        let _ = writeln!(err, "mayfly run needs a value after --root");
-                        return 2;
-                    }
+                match string_value(option_value(rest, index), "--root", err) {
+                    Ok(value) => root = Some(PathBuf::from(value)),
+                    Err(code) => return code,
                 }
                 index += 2;
             }
             "--backend" => {
-                match option_value(rest, index) {
-                    Some(value) => backend = value.to_string_lossy().into_owned(),
-                    None => {
-                        let _ = writeln!(err, "mayfly run needs a value after --backend");
-                        return 2;
-                    }
+                match string_value(option_value(rest, index), "--backend", err) {
+                    Ok(value) => backend = value.to_string_lossy().into_owned(),
+                    Err(code) => return code,
                 }
                 index += 2;
             }
             "--allow-env" => {
-                match option_value(rest, index) {
-                    Some(value) => allow_env.push(value),
-                    None => {
-                        let _ = writeln!(err, "mayfly run needs a value after --allow-env");
-                        return 2;
-                    }
+                match string_value(option_value(rest, index), "--allow-env", err) {
+                    Ok(value) => allow_env.push(value),
+                    Err(code) => return code,
                 }
                 index += 2;
             }
@@ -254,7 +262,14 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
         Ok(backend_impl) => backend_impl.run(&spec),
         Err(exc) => RunReport::early_refusal(&backend, command.clone(), exc.0),
     };
-    let _ = writeln!(out, "{}", report.to_json());
+    // The report is the run's one product and the exit code
+    // below mirrors it, so a report that could not be written
+    // was never delivered and the mirror has nothing to stand
+    // on. The run answers as a harness error, the code that
+    // already names every other harness failure.
+    if writeln!(out, "{}", report.to_json()).is_err() {
+        return HARNESS_EXIT_CODE;
+    }
     if report.outcome == Outcome::HarnessError {
         return HARNESS_EXIT_CODE;
     }
