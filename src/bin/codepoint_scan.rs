@@ -126,7 +126,7 @@ fn scan(root: &Path, out: &mut dyn Write) -> Result<(usize, usize), ScanError> {
 }
 
 fn main() -> ExitCode {
-    let root = std::env::args()
+    let root = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
