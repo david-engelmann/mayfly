@@ -54,6 +54,14 @@ const EXCLUDED_DIRS: [&str; 9] = [
 
 struct ScanError(String);
 
+fn read_failed(path: &Path, err: std::io::Error) -> ScanError {
+    ScanError(format!("cannot read {}, {err}", path.display()))
+}
+
+fn write_failed(err: std::io::Error) -> ScanError {
+    ScanError(format!("cannot write the scan output, {err}"))
+}
+
 fn has_binary_suffix(path: &Path) -> bool {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) => BINARY_SUFFIXES.contains(&ext.to_lowercase().as_str()),
@@ -64,15 +72,11 @@ fn has_binary_suffix(path: &Path) -> bool {
 fn collect(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), ScanError> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut files: Vec<PathBuf> = Vec::new();
-    let entries = std::fs::read_dir(root)
-        .map_err(|err| ScanError(format!("cannot read {}, {err}", root.display())))?;
+    let entries = std::fs::read_dir(root).map_err(|err| read_failed(root, err))?;
     for entry in entries {
-        let entry =
-            entry.map_err(|err| ScanError(format!("cannot read {}, {err}", root.display())))?;
+        let entry = entry.map_err(|err| read_failed(root, err))?;
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|err| ScanError(format!("cannot read {}, {err}", path.display())))?;
+        let file_type = entry.file_type().map_err(|err| read_failed(&path, err))?;
         if file_type.is_dir() {
             dirs.push(path);
         } else if file_type.is_file() || (file_type.is_symlink() && path.is_file()) {
@@ -104,8 +108,7 @@ fn scan(root: &Path, out: &mut dyn Write) -> Result<(usize, usize), ScanError> {
     let mut em_count = 0;
     let mut en_count = 0;
     for path in &files {
-        let bytes = std::fs::read(path)
-            .map_err(|err| ScanError(format!("cannot read {}, {err}", path.display())))?;
+        let bytes = std::fs::read(path).map_err(|err| read_failed(path, err))?;
         let text = std::str::from_utf8(&bytes).map_err(|err| {
             ScanError(format!("cannot decode {} as UTF-8, {err}", path.display()))
         })?;
@@ -124,7 +127,7 @@ fn scan(root: &Path, out: &mut dyn Write) -> Result<(usize, usize), ScanError> {
                 "{}: em dash {file_em}, en dash {file_en}",
                 path.display()
             )
-            .map_err(|err| ScanError(format!("cannot write the scan output, {err}")))?;
+            .map_err(write_failed)?;
         }
         em_count += file_em;
         en_count += file_en;
@@ -140,10 +143,8 @@ fn main() -> ExitCode {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let counted = scan(&root, &mut out).and_then(|(em_count, en_count)| {
-        writeln!(out, "em dash U+2014 count {em_count}")
-            .map_err(|err| ScanError(format!("cannot write the scan output, {err}")))?;
-        writeln!(out, "en dash U+2013 count {en_count}")
-            .map_err(|err| ScanError(format!("cannot write the scan output, {err}")))?;
+        writeln!(out, "em dash U+2014 count {em_count}").map_err(write_failed)?;
+        writeln!(out, "en dash U+2013 count {en_count}").map_err(write_failed)?;
         Ok((em_count, en_count))
     });
     match counted {
