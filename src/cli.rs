@@ -47,13 +47,7 @@ fn bound_value(
     ceiling: Option<u64>,
     err: &mut dyn Write,
 ) -> Result<u64, i32> {
-    let value = match value {
-        Some(value) => value,
-        None => {
-            let _ = writeln!(err, "mayfly run needs a value after {}", name);
-            return Err(2);
-        }
-    };
+    let value = string_value(value, name, err)?;
     let text = value.to_string_lossy();
     let parsed: u64 = match text.parse() {
         Ok(parsed) => parsed,
