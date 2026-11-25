@@ -376,6 +376,43 @@ fn codepoint_scan_skips_excluded_dirs_below_the_root() {
 }
 
 #[test]
+fn codepoint_scan_skips_every_excluded_dir_below_the_root() {
+    let dir = temp_dir("excluded-dirs-all");
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    for name in [
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".venv",
+        "venv",
+        "node_modules",
+        "build",
+        "dist",
+        "target",
+    ] {
+        let excluded = dir.join(name);
+        std::fs::create_dir_all(&excluded).unwrap();
+        std::fs::write(excluded.join("note.md"), "a\u{2014}b").unwrap();
+    }
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 0);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+    // The control. The same dash standing in a real directory
+    // inside a second root counts once, so the zeros are the
+    // exclusions' doing and not a scan that read nothing. A
+    // list re-taken from memory dropping any one of the nine
+    // names counts that name's file and fails the zeros above.
+    let control = temp_dir("excluded-dirs-all-control");
+    let inside = control.join("real-dir");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::write(inside.join("note.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree(&control);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 1"));
+}
+
+#[test]
 fn contract_obligations_carry_their_substance() {
     let text = read("CONTRACT.md");
     for phrase in [
