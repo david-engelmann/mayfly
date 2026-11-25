@@ -294,6 +294,19 @@ fn scan_tree(root: &Path) -> ScanOutput {
     }
 }
 
+fn scan_tree_with_extra(root: &Path, extra: &str) -> ScanOutput {
+    let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+        .arg(root)
+        .arg(extra)
+        .output()
+        .unwrap();
+    ScanOutput {
+        status: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
 fn scan_from(dir: &Path) -> ScanOutput {
     let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
         .current_dir(dir)
@@ -677,6 +690,62 @@ fn codepoint_scan_does_not_follow_a_symlink_to_a_directory() {
     let result = scan_tree(&control);
     assert_eq!(result.status, 1);
     assert!(result.stdout.contains("em dash U+2014 count 1"));
+}
+
+#[test]
+fn codepoint_scan_refuses_an_argument_after_the_root() {
+    let dir = common::Tmp::new("extra-argument");
+    std::fs::write(dir.path().join("clean.md"), "clean").unwrap();
+    let result = scan_tree_with_extra(dir.path(), "second-root");
+    assert_eq!(result.status, 2);
+    assert!(result.stdout.is_empty(), "{}", result.stdout);
+    assert!(result.stderr.contains("second-root"), "{}", result.stderr);
+}
+
+#[test]
+fn codepoint_scan_refuses_an_argument_after_a_dirty_root() {
+    let dir = common::Tmp::new("extra-argument-dirty");
+    std::fs::write(dir.path().join("note.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree_with_extra(dir.path(), "second-root");
+    assert_eq!(result.status, 2);
+    assert!(result.stdout.is_empty(), "{}", result.stdout);
+    assert!(result.stderr.contains("second-root"), "{}", result.stderr);
+}
+
+#[test]
+fn codepoint_scan_extra_argument_on_dead_stderr_exits_two() {
+    let dir = common::Tmp::new("extra-argument-dead-stderr");
+    std::fs::write(dir.path().join("clean.md"), "clean").unwrap();
+    let Some(full) = common::full_device() else {
+        return;
+    };
+    let status = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+        .arg(dir.path())
+        .arg("second-root")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(full))
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(2));
+}
+
+#[test]
+fn portability_workflow_carries_the_fleet_credential_hygiene() {
+    let port_text = read(".github/workflows/portability.yml");
+    assert!(port_text.contains("permissions:\n  contents: read"));
+    assert!(!port_text.contains("write-all"));
+    assert!(!port_text.contains("contents: write"));
+    let checkouts = port_text.matches("actions/checkout@").count();
+    assert!(checkouts >= 1);
+    assert_eq!(
+        port_text.matches("persist-credentials: false").count(),
+        checkouts
+    );
+    assert!(!port_text.contains("rust-toolchain@master"));
+    assert!(
+        toolchain_pins_all_full(&port_text),
+        "every toolchain step in portability.yml must carry a full commit SHA pin"
+    );
 }
 
 #[test]
