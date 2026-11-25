@@ -413,6 +413,7 @@ impl NamespaceBackend {
             };
             return report;
         }
+        let guard = SignalGuard::install();
         // The run's paths are built from the canonical form
         // of the root it was given, and the sweep below runs
         // under that same form, so the janitor and the init
@@ -453,7 +454,6 @@ impl NamespaceBackend {
             spec.command.clone(),
             Outcome::HarnessError,
         );
-        let guard = SignalGuard::install();
         self.run_inner(&mut RunContext {
             spec,
             sandbox_dir: &sandbox_dir,
