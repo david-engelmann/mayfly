@@ -808,7 +808,7 @@ impl NamespaceBackend {
         if let Some((receipt, started)) = by_name.get("started") {
             let ts = event_stamp(started, *receipt);
             started_ts = Some(ts);
-            ctx.timings.start = Some(round3((ts - spawn).max(0.0) * 1000.0));
+            ctx.timings.start = Some(clamped_ms(spawn, ts));
         }
         // The deadline the timeout sets, the started stamp plus
         // the seconds the caller set. A run whose started stamp
@@ -837,7 +837,7 @@ impl NamespaceBackend {
             }
             let done_ts = event_stamp(done, *receipt);
             ended_ts = Some(done_ts);
-            ctx.timings.task = Some(round3((done_ts - started_ts.unwrap()).max(0.0) * 1000.0));
+            ctx.timings.task = Some(clamped_ms(started_ts.unwrap(), done_ts));
             // An interrupt received before the task done stamp
             // makes the run a harness error even where the task
             // done event reaches the runner only after the sandbox
@@ -985,6 +985,16 @@ fn bound_breach(spec: &RunSpec) -> Option<String> {
 /// the deadline's started stamp judge by this one rule.
 fn event_stamp(event: &serde_json::Value, receipt: f64) -> f64 {
     event.get("ts").and_then(|v| v.as_f64()).unwrap_or(receipt)
+}
+
+/// The milliseconds between two stamps on the shared clock,
+/// the later less the earlier, clamped at zero where the
+/// later stamp stands behind the earlier and rounded the
+/// way the report timings are rounded. The start and task
+/// timings are spans between stamps already taken, which
+/// ms_since cannot serve because it reads the clock again.
+fn clamped_ms(earlier: f64, later: f64) -> f64 {
+    round3((later - earlier).max(0.0) * 1000.0)
 }
 
 /// The started stamp the status drain has recorded so far,
