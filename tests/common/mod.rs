@@ -85,3 +85,38 @@ pub fn parse_env_output(text: &str) -> BTreeMap<String, String> {
     }
     seen
 }
+
+/// The /dev/full staging gate the two failed write pins
+/// share. Both pins drive a stream pointed at /dev/full
+/// because every write to the device fails, and both
+/// believed the host's /dev/full without checking it.
+/// Where /dev/full stands as a regular file, writes to it
+/// succeed, and where it is absent the open fails, and in
+/// both states the pins judged their staging rather than
+/// the behavior they guard. full_device opens /dev/full and proves the
+/// staging by a probe write that must fail, handing back
+/// the opened file on the proof and answering None with
+/// the reason printed where the proof cannot be had, so
+/// a gated pin returns early in require_sandbox's shape
+/// and can never pass over staging it did not prove.
+pub fn full_device() -> Option<std::fs::File> {
+    use std::io::Write;
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/full");
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("/dev/full cannot be opened on this host, {}", error);
+            return None;
+        }
+    };
+    match file.write_all(b"probe") {
+        Ok(()) => {
+            eprintln!("/dev/full on this host takes a write, so it is not the failing device");
+            None
+        }
+        Err(_) => Some(file),
+    }
+}

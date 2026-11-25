@@ -409,14 +409,15 @@ fn codepoint_scan_reports_a_failed_output_write_as_a_scan_error() {
     // line over a tree carrying one em dash already fails.
     // Against printing through println! the scanner panics
     // at exit 101 there, outside its own vocabulary, and
-    // this pin fails on that code.
+    // this pin fails on that code. The staging is proved
+    // by common::full_device before the drive, and the pin
+    // skips where the host's /dev/full is not the failing
+    // device.
     let dir = temp_dir("scan-write-fails");
     std::fs::write(dir.join("note.md"), "a\u{2014}b").unwrap();
-    let full = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/full")
-        .unwrap();
+    let Some(full) = common::full_device() else {
+        return;
+    };
     let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
         .arg(&dir)
         .stdout(std::process::Stdio::from(full))

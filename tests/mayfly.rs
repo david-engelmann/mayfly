@@ -3392,13 +3392,15 @@ fn the_hidden_refusals_exit_at_1_when_standard_error_cannot_be_written() {
     // refusals are driven here with standard error pointed at
     // /dev/full, where every write fails, and the pin reads
     // the exit alone. Against a panicking print both drives
-    // die at 101 and the pin fails for that reason.
+    // die at 101 and the pin fails for that reason. The
+    // staging is proved by common::full_device before the
+    // drives, and the pin skips where the host's /dev/full
+    // is not the failing device.
     let tmp = Tmp::new("refusal-full-stderr");
     let rootfs = tmp.path().join("run-refuse000003").join("rootfs");
-    let full = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/full")
-        .unwrap();
+    let Some(full) = common::full_device() else {
+        return;
+    };
     for subcommand in ["__init", "__assemble-root"] {
         let status = Command::new(mayfly_bin())
             .arg(subcommand)
