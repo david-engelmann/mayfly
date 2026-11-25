@@ -394,7 +394,7 @@ impl NamespaceBackend {
         let phase = since.unwrap_or_else(now);
         let _ = std::fs::remove_dir_all(sandbox_dir);
         report.sandbox_removed = Some(!sandbox_dir.exists());
-        timings.teardown = Some(round3((now() - phase) * 1000.0));
+        timings.teardown = Some(ms_since(phase));
     }
 
     pub fn run(&self, spec: &RunSpec) -> RunReport {
