@@ -109,8 +109,15 @@ fn scan(root: &Path, out: &mut dyn Write) -> Result<(usize, usize), ScanError> {
         let text = std::str::from_utf8(&bytes).map_err(|err| {
             ScanError(format!("cannot decode {} as UTF-8, {err}", path.display()))
         })?;
-        let file_em = text.matches(EM_DASH).count();
-        let file_en = text.matches(EN_DASH).count();
+        let mut file_em = 0;
+        let mut file_en = 0;
+        for ch in text.chars() {
+            if ch == EM_DASH {
+                file_em += 1;
+            } else if ch == EN_DASH {
+                file_en += 1;
+            }
+        }
         if file_em > 0 || file_en > 0 {
             writeln!(
                 out,
