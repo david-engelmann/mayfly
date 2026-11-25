@@ -90,11 +90,10 @@ pub fn parse_env_output(text: &str) -> BTreeMap<String, String> {
 /// share. Both pins drive a stream pointed at /dev/full
 /// because every write to the device fails, and both
 /// believed the host's /dev/full without checking it.
-/// Where /dev/full stands as a regular file, a state this
-/// box has carried, writes to it succeed, and where it is
-/// absent the open fails, and in both states the pins
-/// judged their staging rather than the behavior they
-/// guard. full_device opens /dev/full and proves the
+/// Where /dev/full stands as a regular file, writes to it
+/// succeed, and where it is absent the open fails, and in
+/// both states the pins judged their staging rather than
+/// the behavior they guard. full_device opens /dev/full and proves the
 /// staging by a probe write that must fail, handing back
 /// the opened file on the proof and answering None with
 /// the reason printed where the proof cannot be had, so
