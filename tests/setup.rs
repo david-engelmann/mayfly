@@ -294,6 +294,18 @@ fn scan_tree(root: &Path) -> ScanOutput {
     }
 }
 
+fn scan_from(dir: &Path) -> ScanOutput {
+    let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    ScanOutput {
+        status: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
 #[test]
 fn codepoint_scan_reports_zero_for_the_repo() {
     let result = scan_tree(&root());
@@ -379,6 +391,34 @@ fn codepoint_scan_counts_both_dashes_in_one_tree() {
         dir.join("beta.md").display()
     );
     assert_eq!(result.stdout, expected);
+}
+
+#[test]
+fn codepoint_scan_defaults_to_the_working_directory() {
+    // MF-P35. Every other drive in this suite names its root
+    // on the command line, while the gate's own scan step
+    // names none and runs on the default from the checkout
+    // directory, so the default stands driven by the gate
+    // alone and pinned by nothing. A scanner defaulting to
+    // its manifest directory, or to the root of the repo it
+    // ships in as the setup scanner did, would scan this
+    // repo's own tree from any working directory, and that
+    // tree stands at zero counts, so the dash drive below
+    // would answer 0 with both counts at zero. A scanner
+    // refusing without an argument answers at exit 2. This
+    // pin drives the bare form from two planted working
+    // directories and holds both answers.
+    let dir = temp_dir("default-root");
+    std::fs::write(dir.join("note.md"), "a\u{2014}b").unwrap();
+    let result = scan_from(&dir);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 1"));
+    let clean = temp_dir("default-root-clean");
+    std::fs::write(clean.join("note.md"), "plain text").unwrap();
+    let result = scan_from(&clean);
+    assert_eq!(result.status, 0);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
 }
 
 #[test]
