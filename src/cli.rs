@@ -48,6 +48,13 @@ fn bound_value(
     err: &mut dyn Write,
 ) -> Result<u64, i32> {
     let value = string_value(value, name, err)?;
+    let ceiling_refusal = |err: &mut dyn Write, ceiling: u64| {
+        let _ = writeln!(
+            err,
+            "mayfly run needs {} of at most {} seconds",
+            name, ceiling
+        );
+    };
     let text = value.to_string_lossy();
     let parsed: u64 = match text.parse() {
         Ok(parsed) => parsed,
@@ -58,11 +65,7 @@ fn bound_value(
                 // the whole count words would be false for it.
                 // It refuses in range words instead.
                 if let Some(ceiling) = ceiling {
-                    let _ = writeln!(
-                        err,
-                        "mayfly run needs {} of at most {} seconds",
-                        name, ceiling
-                    );
+                    ceiling_refusal(err, ceiling);
                 } else {
                     let _ = writeln!(
                         err,
@@ -83,11 +86,7 @@ fn bound_value(
     }
     if let Some(ceiling) = ceiling {
         if parsed > ceiling {
-            let _ = writeln!(
-                err,
-                "mayfly run needs {} of at most {} seconds",
-                name, ceiling
-            );
+            ceiling_refusal(err, ceiling);
             return Err(2);
         }
     }
