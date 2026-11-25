@@ -3663,6 +3663,9 @@ fn the_init_leaves_provenance_beside_an_assembled_root() {
         "seam00000001"
     );
     assert!(rootfs.join("usr").is_dir());
+    for name in ["etc", "dev", "proc", "sys", "work", "tmp"] {
+        assert!(rootfs.join(name).is_dir());
+    }
 }
 
 fn tmp_provenance_name() -> String {
