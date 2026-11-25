@@ -497,19 +497,7 @@ fn codepoint_scan_skips_a_file_with_an_uppercase_binary_suffix() {
 fn codepoint_scan_skips_every_binary_suffix() {
     let dir = temp_dir("binary-suffixes-all");
     for suffix in [
-        "png",
-        "jpg",
-        "jpeg",
-        "gif",
-        "ico",
-        "webp",
-        "pdf",
-        "zip",
-        "gz",
-        "tar",
-        "whl",
-        "so",
-        "dylib",
+        "png", "jpg", "jpeg", "gif", "ico", "webp", "pdf", "zip", "gz", "tar", "whl", "so", "dylib",
     ] {
         std::fs::write(dir.join(format!("sample.{suffix}")), "a\u{2014}b").unwrap();
     }
