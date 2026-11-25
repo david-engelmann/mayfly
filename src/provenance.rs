@@ -37,7 +37,7 @@ pub fn run_dir_name(run_id: &str) -> String {
 }
 
 /// The name of the clean marker a run with this id leaves
-/// beside its root.
+/// in its run root beside its run directory.
 pub fn clean_marker_name(run_id: &str) -> String {
     format!("{}{}", CLEAN_MARKER_PREFIX, run_id)
 }
