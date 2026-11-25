@@ -65,15 +65,24 @@ struct JanitorHandle {
 }
 
 fn pipe2_cloexec() -> io::Result<(RawFd, RawFd)> {
-    let mut fds: [RawFd; 2] = [0, 0];
-    // The array is owned by this call and holds exactly the two
-    // descriptors pipe2 promises to write, and nothing reads
-    // them back unless the call reports success.
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(target_os = "linux")]
+    {
+        let mut fds: [RawFd; 2] = [0, 0];
+        // The array is owned by this call and holds exactly the two
+        // descriptors pipe2 promises to write, and nothing reads
+        // them back unless the call reports success.
+        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((fds[0], fds[1]))
     }
-    Ok((fds[0], fds[1]))
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::os::unix::io::IntoRawFd;
+        let (reader, writer) = std::io::pipe()?;
+        Ok((reader.into_raw_fd(), writer.into_raw_fd()))
+    }
 }
 
 fn clear_cloexec(fd: RawFd) {
@@ -670,7 +679,10 @@ impl NamespaceBackend {
         // signal safe operations on owned descriptors.
         unsafe {
             cmd.pre_exec(move || {
-                libc::prctl(1, 9, 0, 0, 0);
+                #[cfg(target_os = "linux")]
+                {
+                    libc::prctl(1, 9, 0, 0, 0);
+                }
                 clear_cloexec(status_w);
                 for fd in &pass_fds {
                     clear_cloexec(*fd);

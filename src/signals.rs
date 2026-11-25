@@ -50,10 +50,21 @@ extern "C" fn record_signal(signum: i32) {
 }
 
 fn is_main_thread() -> bool {
-    // gettid and getpid are plain queries with no pointer or
-    // lifetime contract, and their results are compared as
-    // integers only.
-    unsafe { libc::syscall(libc::SYS_gettid) == libc::getpid() as i64 }
+    #[cfg(target_os = "linux")]
+    {
+        // gettid and getpid are plain queries with no pointer or
+        // lifetime contract, and their results are compared as
+        // integers only.
+        unsafe { libc::syscall(libc::SYS_gettid) == libc::getpid() as i64 }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        unsafe { libc::pthread_main_np() == 1 }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        true
+    }
 }
 
 impl SignalGuard {
@@ -77,7 +88,7 @@ impl SignalGuard {
         // keeps for its restore.
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = record_signal as usize;
+            action.sa_sigaction = record_signal as *const () as usize;
             libc::sigemptyset(&mut action.sa_mask);
             action.sa_flags = 0;
             let mut prev_int: libc::sigaction = std::mem::zeroed();
