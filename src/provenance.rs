@@ -427,7 +427,10 @@ fn sweep_one(
         let _ = std::fs::remove_file(marker);
     } else if entry.is_file() && name.starts_with(CLEAN_MARKER_PREFIX) {
         let run_dir = root.join(run_dir_name(&name[CLEAN_MARKER_PREFIX.len()..]));
-        if run_dir.exists() {
+        let run_dir_stands = std::fs::symlink_metadata(&run_dir)
+            .map(|meta| meta.file_type().is_dir())
+            .unwrap_or(false);
+        if run_dir_stands {
             return;
         }
         let mtime = match entry_mtime_secs(entry) {
