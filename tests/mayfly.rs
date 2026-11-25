@@ -2487,6 +2487,59 @@ fn the_sweep_keeps_a_clean_marker_whose_run_directory_still_stands() {
     assert!(!control_marker.exists());
 }
 
+#[test]
+fn the_sweep_takes_an_aged_clean_marker_whose_run_directory_position_holds_a_link() {
+    // MF-P32. The port amendment states the sweep judges a
+    // run directory position by the entry standing there and
+    // never through a link, and the directory arm judges the
+    // position that way, by the entry's own metadata. The
+    // marker arm's first term took the run directory's
+    // absence from exists(), which follows a link standing
+    // at the position, so an aged clean marker whose
+    // position holds a link naming a standing directory was
+    // kept for exactly as long as the planted target stood,
+    // and no later sweep collected it either. The standing
+    // pin beside this one stages a real directory at the
+    // position, the one shape where the two forms agree, so
+    // no pin divided them. Here the position holds a link,
+    // and the marker is swept with its aged control, while
+    // the link and the directory it names stand byte for
+    // byte as planted. The pin fails on the exists() form,
+    // which keeps the first marker, and the control fails on
+    // a sweep that removes nothing.
+    let tmp = Tmp::new("sweep-marker-link-dir");
+    let root_dir = tmp.path().join("root");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let target_dir = tmp.path().join("linked-target");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    std::fs::write(target_dir.join("held.txt"), "held\n").unwrap();
+    let link = root_dir.join("run-ffff00000007");
+    std::os::unix::fs::symlink(&target_dir, &link).unwrap();
+    let swept_marker = root_dir.join(".mayfly-clean-ffff00000007");
+    std::fs::write(&swept_marker, format!("{}\n", "ab".repeat(16))).unwrap();
+    age_directory(&swept_marker, 60.0);
+    let control_marker = root_dir.join(".mayfly-clean-ffff00000008");
+    std::fs::write(&control_marker, format!("{}\n", "ab".repeat(16))).unwrap();
+    age_directory(&control_marker, 60.0);
+    let fake = fake_proc_table(
+        &tmp.path().join("fakeproc-marker-link"),
+        &[(
+            "424242",
+            FakeCmdline::Bytes(b"mayfly-test-unrelated".to_vec()),
+        )],
+    );
+    sweep_orphans_in(&root_dir, &fake);
+    assert!(!swept_marker.exists());
+    assert!(!control_marker.exists());
+    let meta = std::fs::symlink_metadata(&link).unwrap();
+    assert!(meta.file_type().is_symlink());
+    assert_eq!(std::fs::read_link(&link).unwrap(), target_dir);
+    assert_eq!(
+        std::fs::read_to_string(target_dir.join("held.txt")).unwrap(),
+        "held\n"
+    );
+}
+
 // ---------- the canonical spelling of the root ----------
 
 #[test]
