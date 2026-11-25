@@ -1048,6 +1048,7 @@ fn drain_status(fd: RawFd, events: &Arc<Mutex<Vec<(f64, serde_json::Value)>>>) {
                     push_event_line(&line, events);
                 }
             }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
     }
@@ -1069,6 +1070,7 @@ fn drain_stream<R: Read>(mut stream: R, tail: &Arc<TailBuffer>) {
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => tail.feed(&chunk[..n]),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
     }
