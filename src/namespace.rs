@@ -819,8 +819,7 @@ impl NamespaceBackend {
             _ => None,
         };
         let sig_ts = ctx.guard.first_time();
-        let interrupt_at_or_before =
-            |stamp: f64| sig_ts.is_none() || sig_ts.unwrap() <= stamp;
+        let interrupt_at_or_before = |stamp: f64| sig_ts.is_none() || sig_ts.unwrap() <= stamp;
         // An interrupt governs the outcome where it was received
         // at or before the deadline, and the timeout governs
         // where the deadline passed first, because where an
@@ -857,8 +856,7 @@ impl NamespaceBackend {
             let timed_out = match deadline_ts {
                 Some(deadline) => {
                     done_ts > deadline
-                        && !(ctx.guard.interrupted()
-                            && interrupt_at_or_before(deadline))
+                        && !(ctx.guard.interrupted() && interrupt_at_or_before(deadline))
                 }
                 None => false,
             };
