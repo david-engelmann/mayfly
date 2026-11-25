@@ -493,6 +493,42 @@ fn codepoint_scan_skips_a_file_with_an_uppercase_binary_suffix() {
     assert!(result.stdout.contains("en dash U+2013 count 0"));
 }
 
+#[test]
+fn codepoint_scan_skips_every_binary_suffix() {
+    let dir = temp_dir("binary-suffixes-all");
+    for suffix in [
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "ico",
+        "webp",
+        "pdf",
+        "zip",
+        "gz",
+        "tar",
+        "whl",
+        "so",
+        "dylib",
+    ] {
+        std::fs::write(dir.join(format!("sample.{suffix}")), "a\u{2014}b").unwrap();
+    }
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 0);
+    assert!(result.stdout.contains("em dash U+2014 count 0"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+    // The control. A dash file standing at the root of a
+    // second tree counts once, so the zeros are the skips'
+    // doing and not a scan that read nothing. A list re-taken
+    // from memory dropping any one of the thirteen suffixes
+    // counts that suffix's file and fails the zeros above.
+    let control = temp_dir("binary-suffixes-all-control");
+    std::fs::write(control.join("note.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree(&control);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 1"));
+}
+
 fn scan_tree_bounded(root: &Path, timeout_secs: u64) -> ScanOutput {
     let (tx, rx) = std::sync::mpsc::channel();
     let root = root.to_path_buf();
