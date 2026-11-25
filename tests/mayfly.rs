@@ -506,6 +506,37 @@ fn run_report_carries_the_phases_and_the_outcome() {
 }
 
 #[test]
+fn a_task_reads_and_writes_the_bound_device_files() {
+    if !require_sandbox() {
+        return;
+    }
+    // MF-5 binds the basic device files into the prepared
+    // root as single files, and no standing pin opens one
+    // from inside a task, so a bind loop that dropped a
+    // name would pass the whole suite. This pin drives a
+    // task that reads sixteen zero bytes from /dev/zero,
+    // writes to /dev/null, and draws sixteen bytes from
+    // /dev/urandom, and holds the run's own word that all
+    // three stood. A dropped bind leaves the name out of
+    // the root's dev, so the open fails inside the task,
+    // and a plain file standing in the bind's place fails
+    // the reads, which come back empty.
+    let tmp = Tmp::new("device-files");
+    let report = run_task(
+        py_cmd(
+            "z = open('/dev/zero', 'rb').read(16); assert z == bytes(16); \
+             w = open('/dev/null', 'wb'); assert w.write(b'x' * 64) == 64; w.close(); \
+             u = open('/dev/urandom', 'rb').read(16); assert len(u) == 16; \
+             print('devices-ok')",
+        ),
+        tmp.path(),
+    );
+    assert_eq!(report.outcome, Outcome::Task);
+    assert_eq!(report.task_exit_code, Some(0));
+    assert!(report.stdout_tail.contains("devices-ok"));
+}
+
+#[test]
 fn task_exit_code_is_reported_exactly() {
     if !require_sandbox() {
         return;
