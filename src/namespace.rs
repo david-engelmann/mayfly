@@ -819,6 +819,7 @@ impl NamespaceBackend {
             _ => None,
         };
         let sig_ts = ctx.guard.first_time();
+        let interrupt_at_or_before = |stamp: f64| sig_ts.is_none() || sig_ts.unwrap() <= stamp;
         // An interrupt governs the outcome where it was received
         // at or before the deadline, and the timeout governs
         // where the deadline passed first, because where an
@@ -826,7 +827,7 @@ impl NamespaceBackend {
         // the earlier stamp governs.
         let interrupt_before_deadline = ctx.guard.interrupted()
             && match deadline_ts {
-                Some(deadline) => sig_ts.is_none() || sig_ts.unwrap() <= deadline,
+                Some(deadline) => interrupt_at_or_before(deadline),
                 None => true,
             };
         let mut ended_ts: Option<f64> = None;
@@ -855,14 +856,13 @@ impl NamespaceBackend {
             let timed_out = match deadline_ts {
                 Some(deadline) => {
                     done_ts > deadline
-                        && !(ctx.guard.interrupted()
-                            && (sig_ts.is_none() || sig_ts.unwrap() <= deadline))
+                        && !(ctx.guard.interrupted() && interrupt_at_or_before(deadline))
                 }
                 None => false,
             };
             if timed_out {
                 ctx.report.error = Some(timeout_words(ctx.spec.timeout_seconds.unwrap_or(0)));
-            } else if ctx.guard.interrupted() && (sig_ts.is_none() || sig_ts.unwrap() <= done_ts) {
+            } else if ctx.guard.interrupted() && interrupt_at_or_before(done_ts) {
                 ctx.report.error = Some(interrupted_words(ctx.guard.first().unwrap_or(0)));
             } else {
                 ctx.report.outcome = Outcome::Task;
