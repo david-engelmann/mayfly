@@ -235,14 +235,14 @@ fn dir_names(dir: &Path) -> Vec<String> {
     names
 }
 
-fn glob_run_dirs(dir: &Path) -> Vec<PathBuf> {
+fn glob_prefixed(dir: &Path, prefix: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
                 p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with("run-"))
+                    .map(|n| n.to_string_lossy().starts_with(prefix))
                     .unwrap_or(false)
             })
             .collect(),
@@ -252,21 +252,12 @@ fn glob_run_dirs(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+fn glob_run_dirs(dir: &Path) -> Vec<PathBuf> {
+    glob_prefixed(dir, "run-")
+}
+
 fn glob_clean_markers(dir: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with(".mayfly-clean-"))
-                    .unwrap_or(false)
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    out.sort();
-    out
+    glob_prefixed(dir, ".mayfly-clean-")
 }
 
 fn unique_hex() -> String {
