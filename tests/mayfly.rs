@@ -391,7 +391,7 @@ fn real_runner(command: Vec<OsString>, root: &Path) -> RunReport {
     NamespaceBackend::new().run(&spec(command, root))
 }
 
-static SANDBOX_PROBE: LazyLock<(bool, String)> = LazyLock::new(|| probe_core(&real_runner));
+static SANDBOX_PROBE: LazyLock<(bool, String)> = LazyLock::new(|| probe_sandbox_with(&real_runner));
 
 /// The requires-sandbox gate of the Python suite. A gated test
 /// returns early where the host refuses the sandbox, which is
