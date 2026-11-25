@@ -8,8 +8,9 @@
 //! token that appears in no directory listing and in no command
 //! line. While the runner lives, the pipe stays open and the
 //! janitor sleeps on it. When the runner finishes a run it
-//! removes the sandbox itself, leaves a clean marker beside the
-//! run root carrying that token, and closes the pipe, and the
+//! removes the sandbox itself, leaves a clean marker in the
+//! run root beside the sandbox directory carrying that
+//! token, and closes the pipe, and the
 //! janitor sees the marker carries its token and exits. A marker
 //! without the token was planted by someone else and stands
 //! nothing down. When the runner dies without removing the
