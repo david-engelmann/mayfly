@@ -354,6 +354,34 @@ fn codepoint_scan_counts_an_en_dash() {
 }
 
 #[test]
+fn codepoint_scan_counts_both_dashes_in_one_tree() {
+    // MF-P34. Every staged tree in this suite carries at
+    // most one dash kind in any one file, so the scanner's
+    // two tallies stand cross unpinned: a counting loop that
+    // counted each dash in both tallies would print both
+    // totals raised and pass every pin standing, and a per
+    // file line carrying its two counts swapped or dropped
+    // passes likewise, the one pin that reads for a file's
+    // name asserting the name alone. This pin stages both
+    // kinds in one tree and reads the whole output, so it
+    // fails on the double counting form at the totals, on a
+    // swap at the totals and the lines alike, and on a per
+    // file line that drops or swaps its counts or prints
+    // out of the standing order.
+    let dir = temp_dir("both-dashes");
+    std::fs::write(dir.join("alpha.md"), "a\u{2014}b\u{2014}c\u{2013}d").unwrap();
+    std::fs::write(dir.join("beta.md"), "a\u{2014}b").unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 1);
+    let expected = format!(
+        "{}: em dash 2, en dash 1\n{}: em dash 1, en dash 0\nem dash U+2014 count 3\nen dash U+2013 count 1\n",
+        dir.join("alpha.md").display(),
+        dir.join("beta.md").display()
+    );
+    assert_eq!(result.stdout, expected);
+}
+
+#[test]
 fn codepoint_scan_scans_a_root_under_an_excluded_ancestor() {
     let dir = temp_dir("excluded-ancestor").join("venv").join("tree");
     std::fs::create_dir_all(&dir).unwrap();
