@@ -806,10 +806,7 @@ impl NamespaceBackend {
         }
         let mut started_ts: Option<f64> = None;
         if let Some((receipt, started)) = by_name.get("started") {
-            let ts = started
-                .get("ts")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(*receipt);
+            let ts = event_stamp(started, *receipt);
             started_ts = Some(ts);
             ctx.timings.start = Some(round3((ts - spawn).max(0.0) * 1000.0));
         }
@@ -837,7 +834,7 @@ impl NamespaceBackend {
             if started_ts.is_none() {
                 started_ts = Some(spawn);
             }
-            let done_ts = done.get("ts").and_then(|v| v.as_f64()).unwrap_or(*receipt);
+            let done_ts = event_stamp(done, *receipt);
             ended_ts = Some(done_ts);
             ctx.timings.task = Some(round3((done_ts - started_ts.unwrap()).max(0.0) * 1000.0));
             // An interrupt received before the task done stamp
@@ -883,12 +880,7 @@ impl NamespaceBackend {
                     .unwrap_or("the sandbox failed to start")
                     .to_string(),
             );
-            ended_ts = Some(
-                error_event
-                    .get("ts")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(*receipt),
-            );
+            ended_ts = Some(event_stamp(error_event, *receipt));
         } else if interrupt_before_deadline {
             ctx.report.error = Some(interrupted_words(ctx.guard.first().unwrap_or(0)));
         } else if deadline_ts.is_some() && wait_ended >= deadline_ts.unwrap() {
@@ -987,6 +979,14 @@ fn bound_breach(spec: &RunSpec) -> Option<String> {
     None
 }
 
+/// The stamp an event carries: the ts the event was written
+/// with where it carries one, and the moment the runner
+/// received it where it does not. The outcome reading and
+/// the deadline's started stamp judge by this one rule.
+fn event_stamp(event: &serde_json::Value, receipt: f64) -> f64 {
+    event.get("ts").and_then(|v| v.as_f64()).unwrap_or(receipt)
+}
+
 /// The started stamp the status drain has recorded so far,
 /// read the way the outcome code reads it, the stamp the init
 /// put on its started event or the moment the runner received
@@ -996,7 +996,7 @@ fn started_stamp(events: &Arc<Mutex<Vec<(f64, serde_json::Value)>>>) -> Option<f
     let snapshot = events.lock().unwrap();
     for (receipt, event) in snapshot.iter() {
         if event.get("event").and_then(|v| v.as_str()) == Some("started") {
-            return Some(event.get("ts").and_then(|v| v.as_f64()).unwrap_or(*receipt));
+            return Some(event_stamp(event, *receipt));
         }
     }
     None
