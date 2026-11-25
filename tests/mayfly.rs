@@ -518,14 +518,18 @@ fn a_task_reads_and_writes_the_bound_device_files() {
     // writes to /dev/null, and draws sixteen bytes from
     // /dev/urandom, and holds the run's own word that all
     // three stood. A dropped bind leaves the name out of
-    // the root's dev, so the open fails inside the task,
-    // and a plain file standing in the bind's place fails
-    // the reads, which come back empty.
+    // the root's dev, so the reads fail inside the task on
+    // the missing name. The write leg reads /dev/null back
+    // after writing, because the task runs as the owner of
+    // the root and could create a missing name as a plain
+    // file and write into it. The bound device reads back
+    // empty, and a file in its place reads back the bytes.
     let tmp = Tmp::new("device-files");
     let report = run_task(
         py_cmd(
             "z = open('/dev/zero', 'rb').read(16); assert z == bytes(16); \
              w = open('/dev/null', 'wb'); assert w.write(b'x' * 64) == 64; w.close(); \
+             v = open('/dev/null', 'rb').read(16); assert v == b''; \
              u = open('/dev/urandom', 'rb').read(16); assert len(u) == 16; \
              print('devices-ok')",
         ),
