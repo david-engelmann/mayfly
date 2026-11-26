@@ -59,6 +59,21 @@ static PY: LazyLock<PathBuf> = LazyLock::new(|| {
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join("python3");
         if candidate.is_file() {
+            // Resolve through version manager wrapper scripts such as pyenv
+            // shims to the real interpreter binary, because a kernel shebang
+            // cannot name another script as its interpreter.
+            if let Ok(output) = Command::new(&candidate)
+                .args(["-c", "import sys; print(sys.executable)"])
+                .output()
+            {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    let resolved = PathBuf::from(text.trim());
+                    if resolved.is_file() {
+                        return resolved;
+                    }
+                }
+            }
             return candidate;
         }
     }
@@ -377,12 +392,28 @@ fn probe_sandbox_with(runner: &dyn Fn(Vec<OsString>, &Path) -> RunReport) -> (bo
     probe_core(runner)
 }
 
+#[cfg(target_os = "linux")]
 fn real_runner(command: Vec<OsString>, root: &Path) -> RunReport {
     ensure_helper();
     NamespaceBackend::new().run(&spec(command, root))
 }
 
-static SANDBOX_PROBE: LazyLock<(bool, String)> = LazyLock::new(|| probe_sandbox_with(&real_runner));
+static SANDBOX_PROBE: LazyLock<(bool, String)> = LazyLock::new(|| {
+    // Portability adaptation because Linux namespaces exist only on
+    // Linux, so non-Linux hosts report the host refusal directly
+    // rather than invoking the Linux namespace runner.
+    #[cfg(not(target_os = "linux"))]
+    {
+        (
+            false,
+            "Linux namespaces are not available on this host".to_string(),
+        )
+    }
+    #[cfg(target_os = "linux")]
+    {
+        probe_sandbox_with(&real_runner)
+    }
+});
 
 /// The requires-sandbox gate of the Python suite. A gated test
 /// returns early where the host refuses the sandbox, which is
@@ -691,16 +722,31 @@ fn a_file_written_inside_is_gone_with_the_sandbox() {
         .all(|name| !name.ends_with("proof.txt")));
 }
 
+// Portability adaptation because pipe2 is Linux-only, while std::io::pipe
+// creates close-on-exec descriptors portably on other Unix hosts.
+fn pipe_cloexec() -> (RawFd, RawFd) {
+    #[cfg(target_os = "linux")]
+    {
+        let mut fds: [RawFd; 2] = [0, 0];
+        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+        assert_eq!(rc, 0);
+        (fds[0], fds[1])
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::os::unix::io::IntoRawFd;
+        let (reader, writer) = std::io::pipe().unwrap();
+        (reader.into_raw_fd(), writer.into_raw_fd())
+    }
+}
+
 #[test]
 fn no_process_from_the_task_tree_survives_teardown() {
     if !require_sandbox() {
         return;
     }
     let tmp = Tmp::new("tree-death");
-    let mut fds: [RawFd; 2] = [0, 0];
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    assert_eq!(rc, 0);
-    let (read_fd, write_fd) = (fds[0], fds[1]);
+    let (read_fd, write_fd) = pipe_cloexec();
     let script = "import os, sys, time\n\
         fd = int(sys.argv[1])\n\
         pid = os.fork()\n\
@@ -1824,10 +1870,7 @@ fn a_run_refuses_a_standing_rootfs_and_leaves_it_standing() {
 /// watch pipe is closed at once, which is the supervisor dying
 /// without a word.
 fn spawn_janitor(sandbox: &Path, marker: &Path, token: &str) -> Child {
-    let mut fds: [RawFd; 2] = [0, 0];
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    assert_eq!(rc, 0);
-    let (read_fd, write_fd) = (fds[0], fds[1]);
+    let (read_fd, write_fd) = pipe_cloexec();
     let mut cmd = Command::new(mayfly_bin());
     cmd.arg("__janitor")
         .arg("--sandbox")
@@ -2199,6 +2242,10 @@ fn the_janitor_removes_a_sandbox_recreated_behind_its_removal() {
 
 // ---------- the sweep against synthetic process tables ----------
 
+// The three live process table checks below first prove that a
+// spawned sleeper appears under /proc before staging the synthetic
+// table, which is a Linux /proc property.
+#[cfg(target_os = "linux")]
 fn spawn_sleeper(planted: &Path) -> Child {
     Command::new(&*PY)
         .args(["-c", "import time; time.sleep(60)"])
@@ -2220,6 +2267,7 @@ fn plant_sweepable(root: &Path, run_id: &str) -> PathBuf {
 enum FakeCmdline {
     Bytes(Vec<u8>),
     Directory,
+    #[cfg(target_os = "linux")]
     Dangling,
 }
 
@@ -2235,6 +2283,7 @@ fn fake_proc_table(base: &Path, entries: &[(&str, FakeCmdline)]) -> PathBuf {
             FakeCmdline::Directory => {
                 std::fs::create_dir_all(entry.join("cmdline")).unwrap();
             }
+            #[cfg(target_os = "linux")]
             FakeCmdline::Dangling => {
                 std::os::unix::fs::symlink("/nonexistent-mayfly-target", entry.join("cmdline"))
                     .unwrap();
@@ -2244,6 +2293,7 @@ fn fake_proc_table(base: &Path, entries: &[(&str, FakeCmdline)]) -> PathBuf {
     proc_dir
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn the_sweep_reads_a_table_it_cannot_read_at_all_as_unknown() {
     let tmp = Tmp::new("proc-unreadable");
@@ -2274,6 +2324,7 @@ fn the_sweep_reads_a_table_it_cannot_read_at_all_as_unknown() {
     let _ = sleeper.wait();
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn the_sweep_reads_a_refused_cmdline_as_unknown_liveness() {
     let tmp = Tmp::new("proc-refused");
@@ -2307,6 +2358,7 @@ fn the_sweep_reads_a_refused_cmdline_as_unknown_liveness() {
     let _ = sleeper.wait();
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_vanished_process_does_not_make_liveness_unknown() {
     let tmp = Tmp::new("proc-vanished");
@@ -2696,7 +2748,9 @@ mode = os.environ.get("MAYFLY_FAKE_MODE", "late-done")
 
 
 def emit(payload):
-    payload.setdefault("ts", time.monotonic())
+    # Python time.monotonic reads CLOCK_UPTIME_RAW on macOS, whereas
+    # mayfly::now reads CLOCK_MONOTONIC on every Unix host.
+    payload.setdefault("ts", time.clock_gettime(time.CLOCK_MONOTONIC))
     os.write(fd, (json.dumps(payload) + "\n").encode())
 
 
@@ -3140,7 +3194,17 @@ fn a_command_with_a_none_element_is_a_harness_error() {
     // the same place with the same report.
     let tmp = Tmp::new("none-element");
     let bad = OsString::from_vec(b"bad\0arg".to_vec());
-    let report = run_task(vec![py(), bad], tmp.path());
+    // On hosts without a native unshare binary on PATH, supply the
+    // fake unshare path so the run reaches the embedded NUL check in
+    // run_supervised rather than stopping early on missing unshare.
+    ensure_helper();
+    let backend = match NamespaceBackend::new().unshare_path {
+        Some(path) => NamespaceBackend::with_unshare_path(Some(path)),
+        None => NamespaceBackend::with_unshare_path(Some(write_fake_unshare(
+            &tmp.path().join("fakebin"),
+        ))),
+    };
+    let report = backend.run(&spec(vec![py(), bad], tmp.path()));
     assert_eq!(report.outcome, Outcome::HarnessError);
     assert_eq!(report.task_exit_code, None);
     assert_eq!(report.task_signal, None);
@@ -3163,7 +3227,9 @@ fn cli_reports_a_none_command_element_as_a_harness_error() {
     // The command list is handed to the command line entry
     // the way a caller of the library builds it, because
     // shell arguments cannot carry the element through a
-    // process boundary either.
+    // process boundary either. On hosts without a native
+    // unshare binary on PATH, stage the fake unshare under
+    // ENV_LOCK so cli_main reaches the embedded NUL check.
     ensure_helper();
     let tmp = Tmp::new("cli-none-element");
     let bad = OsString::from_vec(b"bad\0arg".to_vec());
@@ -3177,12 +3243,38 @@ fn cli_reports_a_none_command_element_as_a_harness_error() {
     ];
     let mut out: Vec<u8> = Vec::new();
     let mut err: Vec<u8> = Vec::new();
-    let code = cli_main(&args, &mut out, &mut err);
+    let code = if NamespaceBackend::new().unshare_path.is_some() {
+        cli_main(&args, &mut out, &mut err)
+    } else {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let fakebin = tmp.path().join("fakebin");
+        write_fake_unshare(&fakebin);
+        let old_path = std::env::var_os("PATH");
+        let mut paths = vec![fakebin];
+        if let Some(ref existing) = old_path {
+            paths.extend(std::env::split_paths(existing));
+        }
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+        let result = cli_main(&args, &mut out, &mut err);
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        result
+    };
     let payload: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out)).unwrap();
     assert_eq!(code, HARNESS_EXIT_CODE);
     assert_eq!(payload["outcome"], "harness_error");
     assert_eq!(payload["task_exit_code"], serde_json::Value::Null);
     assert_eq!(payload["task_signal"], serde_json::Value::Null);
+    assert!(
+        payload["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("embedded null byte"),
+        "{}",
+        payload
+    );
 }
 
 struct ReportSinkFails;

@@ -82,29 +82,41 @@ pub fn real_mount(
     fstype: Option<&str>,
     flags: u64,
 ) -> Result<(), String> {
-    let src = source.map(cstring);
-    let fs = fstype.map(cstring);
-    let tgt = cstring(target);
-    // Every pointer is either null or borrowed from a CString
-    // this call owns and keeps alive until the call returns,
-    // and the flags are plain values.
-    let rc = unsafe {
-        libc::mount(
-            src.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
-            tgt.as_ptr(),
-            fs.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
-            flags as libc::c_ulong,
-            std::ptr::null(),
-        )
-    };
-    if rc != 0 {
-        let errno = errno_now();
-        return Err(py_os_error_path(
-            &io::Error::from_raw_os_error(errno),
-            Path::new(target),
-        ));
+    #[cfg(target_os = "linux")]
+    {
+        let src = source.map(cstring);
+        let fs = fstype.map(cstring);
+        let tgt = cstring(target);
+        // Every pointer is either null or borrowed from a CString
+        // this call owns and keeps alive until the call returns,
+        // and the flags are plain values.
+        let rc = unsafe {
+            libc::mount(
+                src.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+                tgt.as_ptr(),
+                fs.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+                flags as libc::c_ulong,
+                std::ptr::null(),
+            )
+        };
+        if rc != 0 {
+            let errno = errno_now();
+            return Err(py_os_error_path(
+                &io::Error::from_raw_os_error(errno),
+                Path::new(target),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (source, fstype, flags);
+        let _ = cstring(target);
+        Err(py_os_error_path(
+            &io::Error::from_raw_os_error(libc::ENOSYS),
+            Path::new(target),
+        ))
+    }
 }
 
 /// Decode the escapes the kernel writes into a mount point
@@ -147,6 +159,7 @@ pub fn decode_mount_point(field: &str) -> String {
 /// under the target one by one, deepest first, for kernels where
 /// the call is refused.
 fn remount_read_only_tree(target: &str, mounts: &MountFn) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
     if let Some(number) = table_lookup(SYS_MOUNT_SETATTR, arch_name()) {
         // The mount attr structure is five u64 words, with the
         // set mask in the first word and the size passed as 40.
@@ -169,25 +182,39 @@ fn remount_read_only_tree(target: &str, mounts: &MountFn) -> Result<(), String> 
             return Ok(());
         }
     }
-    let mounts_text = std::fs::read_to_string("/proc/self/mounts")
-        .map_err(|err| py_os_error_path(&err, Path::new("/proc/self/mounts")))?;
-    let mut points: Vec<String> = Vec::new();
-    for line in mounts_text.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() >= 2 {
-            points.push(decode_mount_point(fields[1]));
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (
+            table_lookup(SYS_MOUNT_SETATTR, arch_name()),
+            AT_FDCWD,
+            AT_RECURSIVE,
+            MOUNT_ATTR_RDONLY,
+            decode_mount_point(""),
+        );
+        mounts(Some(target), target, None, MS_BIND | MS_REMOUNT | MS_RDONLY)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mounts_text = std::fs::read_to_string("/proc/self/mounts")
+            .map_err(|err| py_os_error_path(&err, Path::new("/proc/self/mounts")))?;
+        let mut points: Vec<String> = Vec::new();
+        for line in mounts_text.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 2 {
+                points.push(decode_mount_point(fields[1]));
+            }
         }
+        let under: Vec<String> = points
+            .into_iter()
+            .filter(|p| p == target || p.starts_with(&format!("{}/", target)))
+            .collect();
+        let mut sorted = under;
+        sorted.sort_by_key(|point| std::cmp::Reverse(point.len()));
+        for point in sorted {
+            mounts(Some(&point), &point, None, MS_BIND | MS_REMOUNT | MS_RDONLY)?;
+        }
+        Ok(())
     }
-    let under: Vec<String> = points
-        .into_iter()
-        .filter(|p| p == target || p.starts_with(&format!("{}/", target)))
-        .collect();
-    let mut sorted = under;
-    sorted.sort_by_key(|point| std::cmp::Reverse(point.len()));
-    for point in sorted {
-        mounts(Some(&point), &point, None, MS_BIND | MS_REMOUNT | MS_RDONLY)?;
-    }
-    Ok(())
 }
 
 /// Build the prepared root and return whether proc was mounted.
@@ -302,47 +329,60 @@ pub fn enter_root(rootfs: &Path) -> Result<(), String> {
             return Err("[Errno 38] pivot_root is not available on this architecture".to_string())
         }
     };
-    let rootfs_text = rootfs.to_string_lossy().into_owned();
-    real_mount(Some(&rootfs_text), &rootfs_text, None, MS_BIND | MS_REC)?;
-    let oldroot = rootfs.join(".oldroot");
-    std::fs::create_dir_all(&oldroot).map_err(|err| py_os_error_path(&err, &oldroot))?;
-    let new_root = cstring(&rootfs_text);
-    let put_old = cstring(&oldroot.to_string_lossy());
-    // Both paths are CStrings owned here and alive for the
-    // call, and the syscall number was resolved for this
-    // architecture before the call.
-    let rc = unsafe { libc::syscall(number, new_root.as_ptr(), put_old.as_ptr()) };
-    if rc != 0 {
-        let errno = errno_now();
-        return Err(py_os_error_path(
-            &io::Error::from_raw_os_error(errno),
-            Path::new(&rootfs_text),
-        ));
+    #[cfg(target_os = "linux")]
+    {
+        let rootfs_text = rootfs.to_string_lossy().into_owned();
+        real_mount(Some(&rootfs_text), &rootfs_text, None, MS_BIND | MS_REC)?;
+        let oldroot = rootfs.join(".oldroot");
+        std::fs::create_dir_all(&oldroot).map_err(|err| py_os_error_path(&err, &oldroot))?;
+        let new_root = cstring(&rootfs_text);
+        let put_old = cstring(&oldroot.to_string_lossy());
+        // Both paths are CStrings owned here and alive for the
+        // call, and the syscall number was resolved for this
+        // architecture before the call.
+        let rc = unsafe { libc::syscall(number, new_root.as_ptr(), put_old.as_ptr()) };
+        if rc != 0 {
+            let errno = errno_now();
+            return Err(py_os_error_path(
+                &io::Error::from_raw_os_error(errno),
+                Path::new(&rootfs_text),
+            ));
+        }
+        std::env::set_current_dir("/").map_err(|err| py_os_error_path(&err, Path::new("/")))?;
+        let old = cstring("/.oldroot");
+        // The path is a CString owned here and the detach flag is
+        // a plain value, and the old root was just placed there by
+        // the pivot above.
+        let rc = unsafe { libc::umount2(old.as_ptr(), MNT_DETACH) };
+        if rc != 0 {
+            let errno = errno_now();
+            return Err(py_os_error_path(
+                &io::Error::from_raw_os_error(errno),
+                Path::new("/.oldroot"),
+            ));
+        }
+        std::fs::remove_dir("/.oldroot")
+            .map_err(|err| py_os_error_path(&err, Path::new("/.oldroot")))?;
+        Ok(())
     }
-    std::env::set_current_dir("/").map_err(|err| py_os_error_path(&err, Path::new("/")))?;
-    let old = cstring("/.oldroot");
-    // The path is a CString owned here and the detach flag is
-    // a plain value, and the old root was just placed there by
-    // the pivot above.
-    let rc = unsafe { libc::umount2(old.as_ptr(), MNT_DETACH) };
-    if rc != 0 {
-        let errno = errno_now();
-        return Err(py_os_error_path(
-            &io::Error::from_raw_os_error(errno),
-            Path::new("/.oldroot"),
-        ));
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (number, MNT_DETACH);
+        Err(py_os_error_path(
+            &io::Error::from_raw_os_error(libc::ENOSYS),
+            rootfs,
+        ))
     }
-    std::fs::remove_dir("/.oldroot")
-        .map_err(|err| py_os_error_path(&err, Path::new("/.oldroot")))?;
-    Ok(())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[repr(C)]
 struct CapHeader {
     version: u32,
     pid: i32,
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CapData {
@@ -359,29 +399,37 @@ struct CapData {
 /// the errno and its message, in the shape the exec error pipe
 /// reports.
 fn drop_capabilities() -> Result<(), (i32, String)> {
-    // The header and data are repr C structs built to the
-    // kernel layout for version 3 and owned by this call, and
-    // the prctl drops pass plain capability numbers only.
-    unsafe {
-        for cap in 0..64 {
-            libc::prctl(PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0);
+    #[cfg(target_os = "linux")]
+    {
+        // The header and data are repr C structs built to the
+        // kernel layout for version 3 and owned by this call, and
+        // the prctl drops pass plain capability numbers only.
+        unsafe {
+            for cap in 0..64 {
+                libc::prctl(PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0);
+            }
+            let header = CapHeader {
+                version: CAPSET_VERSION_3,
+                pid: 0,
+            };
+            let data = [CapData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            }; 2];
+            let rc = libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr());
+            if rc != 0 {
+                let errno = errno_now();
+                return Err((errno, strerror(errno)));
+            }
         }
-        let header = CapHeader {
-            version: CAPSET_VERSION_3,
-            pid: 0,
-        };
-        let data = [CapData {
-            effective: 0,
-            permitted: 0,
-            inheritable: 0,
-        }; 2];
-        let rc = libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr());
-        if rc != 0 {
-            let errno = errno_now();
-            return Err((errno, strerror(errno)));
-        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (PR_CAPBSET_DROP, CAPSET_VERSION_3);
+        Err((libc::ENOSYS, strerror(libc::ENOSYS)))
+    }
 }
 
 fn status(status_fd: i32, event: serde_json::Value) {
@@ -487,6 +535,31 @@ fn set_task_limits(
     Ok(())
 }
 
+fn create_exec_pipe(pipe_fds: &mut [i32; 2]) -> Result<(), i32> {
+    #[cfg(target_os = "linux")]
+    {
+        if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(errno_now());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+            return Err(errno_now());
+        }
+        unsafe {
+            for &fd in pipe_fds.iter() {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 fn supervise(
     status_fd: i32,
     command: &[OsString],
@@ -494,10 +567,7 @@ fn supervise(
     max_memory_bytes: Option<u64>,
 ) -> i32 {
     let mut pipe_fds: [i32; 2] = [0, 0];
-    // The array is owned by this call and holds exactly the two
-    // descriptors pipe2 promises to write.
-    if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        let errno = errno_now();
+    if let Err(errno) = create_exec_pipe(&mut pipe_fds) {
         return fail(
             status_fd,
             &format!(
@@ -688,7 +758,11 @@ fn set_hostname() -> Result<(), String> {
     let name = cstring(HOSTNAME);
     // The name is a CString owned here and its length is the
     // constant's own length, so the pointer and length agree.
-    let rc = unsafe { libc::sethostname(name.as_ptr(), HOSTNAME.len()) };
+    #[cfg(target_os = "linux")]
+    let len = HOSTNAME.len();
+    #[cfg(not(target_os = "linux"))]
+    let len = HOSTNAME.len() as libc::c_int;
+    let rc = unsafe { libc::sethostname(name.as_ptr(), len) };
     if rc != 0 {
         let errno = errno_now();
         return Err(py_os_error(&io::Error::from_raw_os_error(errno)));
@@ -792,9 +866,22 @@ pub fn init_main(args: &[OsString]) -> i32 {
     // armed delivers the signal at once.
     // The call passes plain scalar arguments only and writes
     // nothing through a pointer.
-    let armed = unsafe { libc::prctl(PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0) };
-    if armed != 0 {
-        let errno = errno_now();
+    #[cfg(target_os = "linux")]
+    let arm_errno = {
+        let armed =
+            unsafe { libc::prctl(PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0) };
+        if armed != 0 {
+            Some(errno_now())
+        } else {
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let arm_errno = {
+        let _ = PR_SET_PDEATHSIG;
+        Some(libc::ENOSYS)
+    };
+    if let Some(errno) = arm_errno {
         let detail = format!(
             "the parent death signal could not be armed, [Errno {}] {}",
             errno,

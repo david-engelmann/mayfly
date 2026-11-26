@@ -1,0 +1,30 @@
+name: Portability
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: "1.91.1"
+          components: rustfmt, clippy
+      - name: Run the local gate on macOS
+        run: cargo test
+      - name: Run the codepoint scan on macOS
+        run: cargo run --bin codepoint_scan
+      - name: Check the formatting on macOS
+        run: cargo fmt --check
+      - name: Run the linter on macOS
+        run: cargo clippy --all-targets -- -D warnings

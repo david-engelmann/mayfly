@@ -49,7 +49,10 @@ pub fn fresh_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("mayfly-test-{}-{}-{}", std::process::id(), n, tag));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    // Resolve any host symlink on the system temp directory, such as
+    // /var resolving to /private/var on macOS, so test fixtures start
+    // from a canonical base directory unless a test plants its own link.
+    std::fs::canonicalize(&dir).unwrap_or(dir)
 }
 
 pub struct Tmp(PathBuf);
@@ -86,19 +89,11 @@ pub fn parse_env_output(text: &str) -> BTreeMap<String, String> {
     seen
 }
 
-/// The /dev/full staging gate the two failed write pins
-/// share. Both pins drive a stream pointed at /dev/full
-/// because every write to the device fails, and both
-/// believed the host's /dev/full without checking it.
-/// Where /dev/full stands as a regular file, writes to it
-/// succeed, and where it is absent the open fails, and in
-/// both states the pins judged their staging rather than
-/// the behavior they guard. full_device opens /dev/full and proves the
-/// staging by a probe write that must fail, handing back
-/// the opened file on the proof and answering None with
-/// the reason printed where the proof cannot be had, so
-/// a gated pin returns early in require_sandbox's shape
-/// and can never pass over staging it did not prove.
+/// The /dev/full staging gate the failed write pins share.
+/// On Linux it opens /dev/full and proves the staging by a probe
+/// write that must fail. On Unix hosts where /dev/full is absent,
+/// such as macOS, it falls back to the write end of a closed pipe
+/// and proves the same failing write before handing the handle back.
 pub fn full_device() -> Option<std::fs::File> {
     use std::io::Write;
     let opened = std::fs::OpenOptions::new()
@@ -107,6 +102,19 @@ pub fn full_device() -> Option<std::fs::File> {
         .open("/dev/full");
     let mut file = match opened {
         Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match std::io::pipe() {
+            Ok((reader, writer)) => {
+                drop(reader);
+                std::fs::File::from(std::os::fd::OwnedFd::from(writer))
+            }
+            Err(pipe_err) => {
+                eprintln!(
+                    "/dev/full is absent and fallback pipe creation failed, {}",
+                    pipe_err
+                );
+                return None;
+            }
+        },
         Err(error) => {
             eprintln!("/dev/full cannot be opened on this host, {}", error);
             return None;
