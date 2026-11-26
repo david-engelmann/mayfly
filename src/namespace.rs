@@ -224,6 +224,7 @@ impl Default for NamespaceBackend {
 /// instead of threading the same parameters through every call.
 struct RunContext<'a> {
     spec: &'a RunSpec,
+    resolved_binds: &'a [(PathBuf, PathBuf)],
     sandbox_dir: &'a Path,
     report: &'a mut RunReport,
     timings: &'a mut Timings,
@@ -291,6 +292,7 @@ impl NamespaceBackend {
         spec: &RunSpec,
         sandbox_dir: &Path,
         status_fd: RawFd,
+        resolved_binds: &[(PathBuf, PathBuf)],
     ) -> (OsString, Vec<OsString>) {
         let mut argv: Vec<OsString> = Vec::new();
         for flag in [
@@ -328,6 +330,12 @@ impl NamespaceBackend {
         if let Some(bytes) = spec.max_memory_bytes {
             argv.push(OsString::from("--max-memory"));
             argv.push(OsString::from(bytes.to_string()));
+        }
+        for (src, dst) in resolved_binds {
+            argv.push(OsString::from("--ro-bind-src"));
+            argv.push(src.clone().into_os_string());
+            argv.push(OsString::from("--ro-bind-dst"));
+            argv.push(dst.clone().into_os_string());
         }
         argv.push(OsString::from("--"));
         for arg in &spec.command {
@@ -422,6 +430,17 @@ impl NamespaceBackend {
             };
             return report;
         }
+        let resolved_binds = match prepare_ro_binds(&spec.ro_binds) {
+            Ok(binds) => binds,
+            Err(error) => {
+                let mut report = RunReport::early_refusal(self.name(), spec.command.clone(), error);
+                report.timings_ms = Timings {
+                    total: Some(ms_since(wall)),
+                    ..Timings::default()
+                };
+                return report;
+            }
+        };
         let guard = SignalGuard::install();
         // The run's paths are built from the canonical form
         // of the root it was given, and the sweep below runs
@@ -465,6 +484,7 @@ impl NamespaceBackend {
         );
         self.run_inner(&mut RunContext {
             spec,
+            resolved_binds: &resolved_binds,
             sandbox_dir: &sandbox_dir,
             report: &mut report,
             timings: &mut timings,
@@ -640,7 +660,8 @@ impl NamespaceBackend {
                 return;
             }
         };
-        let (program, argv) = self.unshare_argv(ctx.spec, ctx.sandbox_dir, status_w);
+        let (program, argv) =
+            self.unshare_argv(ctx.spec, ctx.sandbox_dir, status_w, ctx.resolved_binds);
         // An argument carrying a NUL byte can never reach an
         // exec, and the Python harness refused it at spawn with
         // this wording, before anything was launched.
@@ -989,6 +1010,198 @@ fn bound_breach(spec: &RunSpec) -> Option<String> {
         }
     }
     None
+}
+
+/// Validate the structural rules of MF-14 for read-only bind pairs
+/// and return the normalized sandbox destination paths.
+pub(crate) fn validate_ro_bind_destinations(
+    binds: &[(PathBuf, PathBuf)],
+) -> Result<Vec<PathBuf>, String> {
+    let mut normalized: Vec<PathBuf> = Vec::with_capacity(binds.len());
+    for (src, dst) in binds {
+        if src.as_os_str().is_empty() {
+            return Err("the read-only bind source path is empty".to_string());
+        }
+        if src.as_os_str().as_bytes().contains(&0) {
+            return Err("the read-only bind source path contains a NUL byte".to_string());
+        }
+        let raw = dst.as_os_str().as_bytes();
+        if raw.is_empty() || raw[0] != b'/' {
+            return Err(format!(
+                "the read-only bind destination {} must start with /",
+                dst.display()
+            ));
+        }
+        if raw.contains(&0) {
+            return Err(format!(
+                "the read-only bind destination {} contains a NUL byte",
+                dst.display()
+            ));
+        }
+        let mut segments: Vec<&[u8]> = Vec::new();
+        for part in raw[1..].split(|&byte| byte == b'/') {
+            if part.is_empty() {
+                continue;
+            }
+            if part == b"." || part == b".." {
+                return Err(format!(
+                    "the read-only bind destination {} cannot contain dot or parent segments",
+                    dst.display()
+                ));
+            }
+            segments.push(part);
+        }
+        if segments.is_empty() {
+            return Err("the read-only bind destination / is reserved".to_string());
+        }
+        if matches!(
+            segments[0],
+            b".oldroot"
+                | b"proc"
+                | b"dev"
+                | b"sys"
+                | b"usr"
+                | b"etc"
+                | b"bin"
+                | b"sbin"
+                | b"lib"
+                | b"lib64"
+                | b"tmp"
+        ) {
+            return Err(format!(
+                "the read-only bind destination {} lies inside a reserved sandbox path",
+                dst.display()
+            ));
+        }
+        if segments[0] == b"work" && segments.len() == 1 {
+            return Err("the read-only bind destination /work is reserved".to_string());
+        }
+        let mut norm_os = OsString::new();
+        for seg in &segments {
+            norm_os.push("/");
+            norm_os.push(std::ffi::OsStr::from_bytes(seg));
+        }
+        let norm_dst = PathBuf::from(norm_os);
+        for existing in &normalized {
+            let a = existing.as_os_str().as_bytes();
+            let b = norm_dst.as_os_str().as_bytes();
+            if a == b {
+                return Err(format!(
+                    "the read-only bind destination {} is named more than once",
+                    norm_dst.display()
+                ));
+            }
+            let b_under_a = b.len() > a.len() && b.starts_with(a) && b[a.len()] == b'/';
+            let a_under_b = a.len() > b.len() && a.starts_with(b) && a[b.len()] == b'/';
+            if b_under_a || a_under_b {
+                return Err(format!(
+                    "the read-only bind destinations {} and {} overlap",
+                    existing.display(),
+                    norm_dst.display()
+                ));
+            }
+        }
+        normalized.push(norm_dst);
+    }
+    Ok(normalized)
+}
+
+/// Inspect one host source path for MF-14 without following a final
+/// symbolic link, even when the caller appended trailing slashes or dot
+/// suffixes, while permitting legitimate relative host paths.
+pub(crate) fn inspect_ro_bind_source(src: &Path) -> Result<(PathBuf, bool), String> {
+    let raw = src.as_os_str().as_bytes();
+    if raw.is_empty() {
+        return Err("the read-only bind source path is empty".to_string());
+    }
+    if raw.contains(&0) {
+        return Err("the read-only bind source path contains a NUL byte".to_string());
+    }
+    let requires_dir = (raw.len() > 1 && raw.ends_with(b"/"))
+        || raw == b"."
+        || raw == b".."
+        || raw.ends_with(b"/.")
+        || raw.ends_with(b"/..");
+    let abs_raw = std::path::absolute(src).map_err(|err| {
+        format!(
+            "the read-only bind source {} cannot be resolved, {}",
+            src.display(),
+            py_os_error(&err)
+        )
+    })?;
+    let abs_bytes = abs_raw.as_os_str().as_bytes();
+    let trimmed_len = if abs_bytes.iter().all(|&b| b == b'/') {
+        1
+    } else {
+        let mut end = abs_bytes.len();
+        while end > 1 && abs_bytes[end - 1] == b'/' {
+            end -= 1;
+        }
+        end
+    };
+    let trimmed = &abs_bytes[..trimmed_len];
+    if let Some(before_dotdot) = trimmed.strip_suffix(b"/..") {
+        if !before_dotdot.is_empty() {
+            let prefix_path = Path::new(std::ffi::OsStr::from_bytes(before_dotdot));
+            if let Ok(prefix_meta) = std::fs::symlink_metadata(prefix_path) {
+                if prefix_meta.file_type().is_symlink() {
+                    return Err(format!(
+                        "the read-only bind source {} is a symbolic link",
+                        src.display()
+                    ));
+                }
+            }
+        }
+    }
+    let abs_src = PathBuf::from(std::ffi::OsStr::from_bytes(trimmed));
+    let meta = match std::fs::symlink_metadata(&abs_src) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(format!(
+                "the read-only bind source {} does not exist",
+                src.display()
+            ));
+        }
+        Err(err) => {
+            return Err(format!(
+                "the read-only bind source {} cannot be inspected, {}",
+                src.display(),
+                py_os_error(&err)
+            ));
+        }
+    };
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        return Err(format!(
+            "the read-only bind source {} is a symbolic link",
+            src.display()
+        ));
+    }
+    if !ft.is_dir() && !ft.is_file() {
+        return Err(format!(
+            "the read-only bind source {} is not a regular file or directory",
+            src.display()
+        ));
+    }
+    if requires_dir && !ft.is_dir() {
+        return Err(format!(
+            "the read-only bind source {} names a directory form on a non-directory",
+            src.display()
+        ));
+    }
+    Ok((abs_src, ft.is_dir()))
+}
+
+/// Validate both the destination rules and the host source files
+/// of MF-14 before any sandbox directory is prepared.
+fn prepare_ro_binds(binds: &[(PathBuf, PathBuf)]) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let normalized = validate_ro_bind_destinations(binds)?;
+    let mut resolved = Vec::with_capacity(binds.len());
+    for ((src, _), norm_dst) in binds.iter().zip(normalized) {
+        let (abs_src, _is_dir) = inspect_ro_bind_source(src)?;
+        resolved.push((abs_src, norm_dst));
+    }
+    Ok(resolved)
 }
 
 /// The stamp an event carries: the ts the event was written

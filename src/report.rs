@@ -63,12 +63,17 @@ pub struct RunSpec {
     /// the caller sets one, under MF-13. None runs under no
     /// address space ceiling.
     pub max_memory_bytes: Option<u64>,
+    /// Caller-granted host files or directories bound read-only
+    /// into the prepared root at absolute sandbox paths, under
+    /// MF-14. Empty by default.
+    pub ro_binds: Vec<(PathBuf, PathBuf)>,
 }
 
 impl RunSpec {
     /// A spec carrying the defaults, allow_env at PATH alone,
     /// the network off, no handed descriptors, no caller
-    /// environment snapshot, and no bound of MF-13 set.
+    /// environment snapshot, no bound of MF-13 set, and no
+    /// read-only binds of MF-14.
     pub fn new(command: Vec<OsString>, root: PathBuf) -> RunSpec {
         RunSpec {
             command,
@@ -80,6 +85,7 @@ impl RunSpec {
             timeout_seconds: None,
             max_cpu_seconds: None,
             max_memory_bytes: None,
+            ro_binds: Vec::new(),
         }
     }
 }
