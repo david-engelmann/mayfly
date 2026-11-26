@@ -71,22 +71,39 @@ fn cstring(text: &str) -> CString {
     CString::new(text).unwrap_or_else(|_| CString::new("").expect("empty cstring"))
 }
 
+fn cstring_path(path: &Path) -> Result<CString, String> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| py_os_error_path(&io::Error::from_raw_os_error(libc::EINVAL), path))
+}
+
 /// One mount call, in the shape the assembly drives it. The
 /// error text is the str of the OSError the Python init raised
 /// for the same call, errno and message and target.
 pub type MountFn<'a> = dyn Fn(Option<&str>, &str, Option<&str>, u64) -> Result<(), String> + 'a;
 
-pub fn real_mount(
-    source: Option<&str>,
-    target: &str,
+/// One mount call carrying an optional filesystem option string.
+pub type MountOptsFn<'a> =
+    dyn Fn(Option<&str>, &str, Option<&str>, u64, Option<&str>) -> Result<(), String> + 'a;
+
+type MountPathFn<'a> =
+    dyn Fn(Option<&Path>, &Path, Option<&str>, u64, Option<&str>) -> Result<(), String> + 'a;
+
+fn real_mount_path_opts(
+    source: Option<&Path>,
+    target: &Path,
     fstype: Option<&str>,
     flags: u64,
+    data: Option<&str>,
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let src = source.map(cstring);
+        let src = match source {
+            Some(p) => Some(cstring_path(p)?),
+            None => None,
+        };
         let fs = fstype.map(cstring);
-        let tgt = cstring(target);
+        let tgt = cstring_path(target)?;
+        let opt = data.map(cstring);
         // Every pointer is either null or borrowed from a CString
         // this call owns and keeps alive until the call returns,
         // and the flags are plain values.
@@ -96,40 +113,62 @@ pub fn real_mount(
                 tgt.as_ptr(),
                 fs.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
                 flags as libc::c_ulong,
-                std::ptr::null(),
+                opt.as_ref()
+                    .map_or(std::ptr::null(), |d| d.as_ptr() as *const libc::c_void),
             )
         };
         if rc != 0 {
             let errno = errno_now();
             return Err(py_os_error_path(
                 &io::Error::from_raw_os_error(errno),
-                Path::new(target),
+                target,
             ));
         }
         Ok(())
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (source, fstype, flags);
-        let _ = cstring(target);
+        if let Some(p) = source {
+            let _ = cstring_path(p)?;
+        }
+        let _ = cstring_path(target)?;
+        let _ = (fstype.map(cstring), flags, data.map(cstring));
         Err(py_os_error_path(
             &io::Error::from_raw_os_error(libc::ENOSYS),
-            Path::new(target),
+            target,
         ))
     }
 }
 
+pub fn real_mount_opts(
+    source: Option<&str>,
+    target: &str,
+    fstype: Option<&str>,
+    flags: u64,
+    data: Option<&str>,
+) -> Result<(), String> {
+    real_mount_path_opts(
+        source.map(Path::new),
+        Path::new(target),
+        fstype,
+        flags,
+        data,
+    )
+}
+
+pub fn real_mount(
+    source: Option<&str>,
+    target: &str,
+    fstype: Option<&str>,
+    flags: u64,
+) -> Result<(), String> {
+    real_mount_opts(source, target, fstype, flags, None)
+}
+
 /// Decode the escapes the kernel writes into a mount point
-/// field of the mounts table. A space in a mount point stands
-/// in the table as a backslash followed by three octal digits,
-/// and so do a tab and a newline and a backslash itself, so a
-/// literal comparison against the real path never matches a
-/// tree bound under an escaped path. Anything that is not a
-/// backslash followed by three octal digits that name a byte
-/// stands as itself, and an escape whose first digit stands
-/// above 3 names no byte and stands as itself with the rest.
-pub fn decode_mount_point(field: &str) -> String {
-    let bytes = field.as_bytes();
+/// field of the mounts table into raw bytes without lossy UTF-8
+/// substitution.
+pub fn decode_mount_point_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
@@ -149,7 +188,20 @@ pub fn decode_mount_point(field: &str) -> String {
             index += 1;
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
+}
+
+/// Decode the escapes the kernel writes into a mount point
+/// field of the mounts table. A space in a mount point stands
+/// in the table as a backslash followed by three octal digits,
+/// and so do a tab and a newline and a backslash itself, so a
+/// literal comparison against the real path never matches a
+/// tree bound under an escaped path. Anything that is not a
+/// backslash followed by three octal digits that name a byte
+/// stands as itself, and an escape whose first digit stands
+/// above 3 names no byte and stands as itself with the rest.
+pub fn decode_mount_point(field: &str) -> String {
+    String::from_utf8_lossy(&decode_mount_point_bytes(field.as_bytes())).into_owned()
 }
 
 /// Set the read only flag on a bound tree and every submount.
@@ -158,13 +210,13 @@ pub fn decode_mount_point(field: &str) -> String {
 /// kernel offers it. The walk behind it remounts each mount point
 /// under the target one by one, deepest first, for kernels where
 /// the call is refused.
-fn remount_read_only_tree(target: &str, mounts: &MountFn) -> Result<(), String> {
+fn remount_read_only_tree_path(target: &Path, mount_path: &MountPathFn) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if let Some(number) = table_lookup(SYS_MOUNT_SETATTR, arch_name()) {
         // The mount attr structure is five u64 words, with the
         // set mask in the first word and the size passed as 40.
         let attr: [u64; 5] = [MOUNT_ATTR_RDONLY, 0, 0, 0, 0];
-        let tgt = cstring(target);
+        let tgt = cstring_path(target)?;
         // The structure is a plain array of words whose layout
         // the call defines, the target string outlives the call,
         // and the kernel reads both only for the call's duration.
@@ -191,36 +243,90 @@ fn remount_read_only_tree(target: &str, mounts: &MountFn) -> Result<(), String> 
             MOUNT_ATTR_RDONLY,
             decode_mount_point(""),
         );
-        mounts(Some(target), target, None, MS_BIND | MS_REMOUNT | MS_RDONLY)
+        mount_path(
+            Some(target),
+            target,
+            None,
+            MS_BIND | MS_REMOUNT | MS_RDONLY,
+            None,
+        )
     }
     #[cfg(target_os = "linux")]
     {
-        let mounts_text = std::fs::read_to_string("/proc/self/mounts")
+        let mounts_raw = std::fs::read("/proc/self/mounts")
             .map_err(|err| py_os_error_path(&err, Path::new("/proc/self/mounts")))?;
-        let mut points: Vec<String> = Vec::new();
-        for line in mounts_text.lines() {
-            let fields: Vec<&str> = line.split_whitespace().collect();
+        let mut points: Vec<Vec<u8>> = Vec::new();
+        for line in mounts_raw.split(|&b| b == b'\n') {
+            let fields: Vec<&[u8]> = line
+                .split(|&b| b == b' ' || b == b'\t' || b == b'\r')
+                .filter(|s| !s.is_empty())
+                .collect();
             if fields.len() >= 2 {
-                points.push(decode_mount_point(fields[1]));
+                points.push(decode_mount_point_bytes(fields[1]));
             }
         }
-        let under: Vec<String> = points
+        let target_bytes = target.as_os_str().as_bytes();
+        let mut under: Vec<Vec<u8>> = points
             .into_iter()
-            .filter(|p| p == target || p.starts_with(&format!("{}/", target)))
+            .filter(|p| {
+                p.as_slice() == target_bytes
+                    || (p.len() > target_bytes.len()
+                        && p.starts_with(target_bytes)
+                        && p[target_bytes.len()] == b'/')
+            })
             .collect();
-        let mut sorted = under;
-        sorted.sort_by_key(|point| std::cmp::Reverse(point.len()));
-        for point in sorted {
-            mounts(Some(&point), &point, None, MS_BIND | MS_REMOUNT | MS_RDONLY)?;
+        under.sort_by_key(|point| std::cmp::Reverse(point.len()));
+        for point in under {
+            let point_path = Path::new(std::ffi::OsStr::from_bytes(&point));
+            mount_path(
+                Some(point_path),
+                point_path,
+                None,
+                MS_BIND | MS_REMOUNT | MS_RDONLY,
+                None,
+            )?;
         }
         Ok(())
     }
 }
 
-/// Build the prepared root and return whether proc was mounted.
-pub fn assemble_root_with(rootfs: &Path, mounts: &MountFn) -> Result<bool, String> {
+fn ensure_dir_nofollow(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(py_os_error_path(
+                    &io::Error::from_raw_os_error(libc::ENOTDIR),
+                    path,
+                ));
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            std::fs::create_dir(path).map_err(|e| py_os_error_path(&e, path))
+        }
+        Err(err) => Err(py_os_error_path(&err, path)),
+    }
+}
+
+fn create_regular_target_nofollow(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o644)
+        .open(path)
+        .map(|_| ())
+        .map_err(|err| py_os_error_path(&err, path))
+}
+
+fn assemble_root_inner(
+    rootfs: &Path,
+    ro_binds: &[(PathBuf, PathBuf)],
+    mount_path: &MountPathFn,
+) -> Result<bool, String> {
     write_provenance_init(rootfs);
-    mounts(None, "/", None, MS_REC | MS_PRIVATE)?;
+    mount_path(None, Path::new("/"), None, MS_REC | MS_PRIVATE, None)?;
     for name in ROOT_DIRS {
         let dir = rootfs.join(name);
         std::fs::create_dir_all(&dir).map_err(|err| py_os_error_path(&err, &dir))?;
@@ -243,15 +349,14 @@ pub fn assemble_root_with(rootfs: &Path, mounts: &MountFn) -> Result<bool, Strin
             }
         }
     }
-    let mut targets: Vec<String> = Vec::new();
+    let mut targets: Vec<PathBuf> = Vec::new();
     for host in &bind_sources {
         let target = rootfs.join(host.trim_start_matches('/'));
-        let target_text = target.to_string_lossy().into_owned();
-        mounts(Some(host), &target_text, None, MS_BIND | MS_REC)?;
-        targets.push(target_text);
+        mount_path(Some(Path::new(host)), &target, None, MS_BIND | MS_REC, None)?;
+        targets.push(target);
     }
     for target in &targets {
-        remount_read_only_tree(target, mounts)?;
+        remount_read_only_tree_path(target, mount_path)?;
     }
     for name in DEVICE_FILES {
         let target = rootfs.join("dev").join(name);
@@ -262,23 +367,105 @@ pub fn assemble_root_with(rootfs: &Path, mounts: &MountFn) -> Result<bool, Strin
                 .open(&target)
                 .map_err(|err| py_os_error_path(&err, &target))?;
         }
-        mounts(
-            Some(&format!("/dev/{}", name)),
-            &target.to_string_lossy(),
-            None,
-            MS_BIND,
-        )?;
+        let dev_src = format!("/dev/{}", name);
+        mount_path(Some(Path::new(&dev_src)), &target, None, MS_BIND, None)?;
     }
     let work = rootfs.join("work");
-    mounts(Some("tmpfs"), &work.to_string_lossy(), Some("tmpfs"), 0)?;
+    mount_path(Some(Path::new("tmpfs")), &work, Some("tmpfs"), 0, None)?;
+    let tmp = rootfs.join("tmp");
+    mount_path(
+        Some(Path::new("tmpfs")),
+        &tmp,
+        Some("tmpfs"),
+        0,
+        Some("mode=1777"),
+    )?;
+    if !ro_binds.is_empty() {
+        let norm_dests = crate::namespace::validate_ro_bind_destinations(ro_binds)?;
+        for ((host_src, _), norm_dst) in ro_binds.iter().zip(norm_dests) {
+            let (clean_src, is_dir) = crate::namespace::inspect_ro_bind_source(host_src)?;
+            let rel_bytes = norm_dst
+                .as_os_str()
+                .as_bytes()
+                .strip_prefix(b"/")
+                .unwrap_or(b"");
+            let parts: Vec<&[u8]> = rel_bytes
+                .split(|&b| b == b'/')
+                .filter(|s| !s.is_empty())
+                .collect();
+            let mut cursor = rootfs.to_path_buf();
+            for parent_part in &parts[..parts.len() - 1] {
+                cursor.push(std::ffi::OsStr::from_bytes(parent_part));
+                ensure_dir_nofollow(&cursor)?;
+            }
+            cursor.push(std::ffi::OsStr::from_bytes(parts[parts.len() - 1]));
+            if is_dir {
+                ensure_dir_nofollow(&cursor)?;
+                mount_path(Some(&clean_src), &cursor, None, MS_BIND | MS_REC, None)?;
+            } else {
+                create_regular_target_nofollow(&cursor)?;
+                mount_path(Some(&clean_src), &cursor, None, MS_BIND, None)?;
+            }
+            remount_read_only_tree_path(&cursor, mount_path)?;
+        }
+    }
     let proc_dir = rootfs.join("proc");
-    let proc_mounted = mounts(Some("proc"), &proc_dir.to_string_lossy(), Some("proc"), 0).is_ok();
+    let proc_mounted =
+        mount_path(Some(Path::new("proc")), &proc_dir, Some("proc"), 0, None).is_ok();
     write_provenance_init(rootfs);
     Ok(proc_mounted)
 }
 
+fn path_to_str(p: &Path) -> Result<&str, String> {
+    p.to_str()
+        .ok_or_else(|| py_os_error_path(&io::Error::from_raw_os_error(libc::EINVAL), p))
+}
+
+/// Build the prepared root with optional read-only binds and return whether proc was mounted.
+pub fn assemble_root_with_binds(
+    rootfs: &Path,
+    ro_binds: &[(PathBuf, PathBuf)],
+    mounts: &MountFn,
+    mount_opts: &MountOptsFn,
+) -> Result<bool, String> {
+    let adapt_path = |src: Option<&Path>,
+                      target: &Path,
+                      fstype: Option<&str>,
+                      flags: u64,
+                      data: Option<&str>|
+     -> Result<(), String> {
+        let src_str = match src {
+            Some(s) => Some(path_to_str(s)?),
+            None => None,
+        };
+        let target_str = path_to_str(target)?;
+        if data.is_some() {
+            mount_opts(src_str, target_str, fstype, flags, data)
+        } else {
+            mounts(src_str, target_str, fstype, flags)
+        }
+    };
+    assemble_root_inner(rootfs, ro_binds, &adapt_path)
+}
+
+/// Build the prepared root using raw operating system paths without UTF-8 restriction.
+pub fn assemble_root_os(rootfs: &Path, ro_binds: &[(PathBuf, PathBuf)]) -> Result<bool, String> {
+    assemble_root_inner(rootfs, ro_binds, &real_mount_path_opts)
+}
+
+/// Build the prepared root and return whether proc was mounted.
+pub fn assemble_root_with(rootfs: &Path, mounts: &MountFn) -> Result<bool, String> {
+    let adapt = |src: Option<&str>,
+                 target: &str,
+                 fstype: Option<&str>,
+                 flags: u64,
+                 _data: Option<&str>|
+     -> Result<(), String> { mounts(src, target, fstype, flags) };
+    assemble_root_with_binds(rootfs, &[], mounts, &adapt)
+}
+
 pub fn assemble_root(rootfs: &Path) -> Result<bool, String> {
-    assemble_root_with(rootfs, &real_mount)
+    assemble_root_os(rootfs, &[])
 }
 
 /// Write the run provenance beside the prepared root.
@@ -770,21 +957,207 @@ fn set_hostname() -> Result<(), String> {
     Ok(())
 }
 
-fn opt_value<'a>(opts: &'a [OsString], name: &str) -> Option<&'a OsString> {
-    opts.iter()
-        .position(|arg| arg.as_os_str() == name)
-        .and_then(|index| opts.get(index + 1))
+fn extract_status_fd(args: &[OsString]) -> Option<i32> {
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].as_os_str();
+        if flag == "--" {
+            break;
+        }
+        if flag == "--status-fd" {
+            return args
+                .get(index + 1)
+                .and_then(|v| v.to_str())
+                .and_then(|t| t.parse().ok());
+        }
+        if flag == "--rootfs" || flag == "--max-cpu" || flag == "--max-memory" {
+            index += 2;
+            continue;
+        }
+        if flag == "--ro-bind-src" {
+            if args.get(index + 2).map(OsString::as_os_str)
+                == Some(std::ffi::OsStr::new("--ro-bind-dst"))
+            {
+                index += 4;
+            } else {
+                index += 2;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    None
 }
 
-/// The named option's value parsed into the type the
-/// caller reads it as, or None where the option stands
-/// absent, its value is not text, or its text does not
-/// parse, the one parse rule every numbered option of
-/// the init is read under.
-fn opt_parsed<T: std::str::FromStr>(opts: &[OsString], name: &str) -> Option<T> {
-    opt_value(opts, name)
-        .and_then(|value| value.to_str())
-        .and_then(|text| text.parse().ok())
+struct InitArgs {
+    rootfs: PathBuf,
+    status_fd: i32,
+    max_cpu_seconds: Option<u64>,
+    max_memory_bytes: Option<u64>,
+    ro_binds: Vec<(PathBuf, PathBuf)>,
+    command: Vec<OsString>,
+}
+
+enum InitParseFailure {
+    Silent,
+    PreparedRoot(i32, String),
+    NoCommand(i32),
+}
+
+fn parse_init_args(args: &[OsString]) -> Result<InitArgs, InitParseFailure> {
+    let mut rootfs: Option<PathBuf> = None;
+    let mut status_fd: Option<i32> = None;
+    let mut max_cpu_seconds: Option<u64> = None;
+    let mut max_memory_bytes: Option<u64> = None;
+    let mut ro_binds: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut command: Option<Vec<OsString>> = None;
+    let mut index = 0;
+    let report_err = |seen_fd: Option<i32>, msg: String| -> InitParseFailure {
+        match seen_fd.or_else(|| extract_status_fd(args)) {
+            Some(fd) => InitParseFailure::PreparedRoot(fd, msg),
+            None => InitParseFailure::Silent,
+        }
+    };
+    while index < args.len() {
+        let flag = args[index].as_os_str();
+        if flag == "--" {
+            command = Some(args[index + 1..].to_vec());
+            break;
+        }
+        if flag == "--rootfs" {
+            let Some(val) = args.get(index + 1) else {
+                return Err(InitParseFailure::Silent);
+            };
+            rootfs = Some(PathBuf::from(val));
+            index += 2;
+            continue;
+        }
+        if flag == "--status-fd" {
+            let Some(fd) = args
+                .get(index + 1)
+                .and_then(|v| v.to_str())
+                .and_then(|t| t.parse::<i32>().ok())
+            else {
+                return Err(InitParseFailure::Silent);
+            };
+            status_fd = Some(fd);
+            index += 2;
+            continue;
+        }
+        if flag == "--max-cpu" {
+            let Some(val) = args.get(index + 1) else {
+                return Err(InitParseFailure::Silent);
+            };
+            max_cpu_seconds = val.to_str().and_then(|t| t.parse().ok());
+            index += 2;
+            continue;
+        }
+        if flag == "--max-memory" {
+            let Some(val) = args.get(index + 1) else {
+                return Err(InitParseFailure::Silent);
+            };
+            max_memory_bytes = val.to_str().and_then(|t| t.parse().ok());
+            index += 2;
+            continue;
+        }
+        if flag == "--ro-bind-src" {
+            let Some(src) = args.get(index + 1) else {
+                return Err(report_err(
+                    status_fd,
+                    "missing --ro-bind-src value".to_string(),
+                ));
+            };
+            if args.get(index + 2).map(OsString::as_os_str)
+                != Some(std::ffi::OsStr::new("--ro-bind-dst"))
+            {
+                return Err(report_err(
+                    status_fd,
+                    "missing --ro-bind-dst after --ro-bind-src".to_string(),
+                ));
+            }
+            let Some(dst) = args.get(index + 3) else {
+                return Err(report_err(
+                    status_fd,
+                    "missing --ro-bind-dst value".to_string(),
+                ));
+            };
+            ro_binds.push((PathBuf::from(src), PathBuf::from(dst)));
+            index += 4;
+            continue;
+        }
+        return Err(report_err(
+            status_fd,
+            format!("unknown init option {}", flag.to_string_lossy()),
+        ));
+    }
+    let Some(rootfs) = rootfs else {
+        return Err(InitParseFailure::Silent);
+    };
+    let Some(status_fd) = status_fd else {
+        return Err(InitParseFailure::Silent);
+    };
+    let Some(command) = command else {
+        return Err(InitParseFailure::Silent);
+    };
+    if command.is_empty() {
+        return Err(InitParseFailure::NoCommand(status_fd));
+    }
+    Ok(InitArgs {
+        rootfs,
+        status_fd,
+        max_cpu_seconds,
+        max_memory_bytes,
+        ro_binds,
+        command,
+    })
+}
+
+struct AssembleArgs {
+    rootfs: PathBuf,
+    ro_binds: Vec<(PathBuf, PathBuf)>,
+}
+
+fn parse_assemble_args(args: &[OsString]) -> Result<AssembleArgs, Option<String>> {
+    let mut rootfs: Option<PathBuf> = None;
+    let mut ro_binds: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].as_os_str();
+        if flag == "--rootfs" {
+            let Some(val) = args.get(index + 1) else {
+                return Err(None);
+            };
+            rootfs = Some(PathBuf::from(val));
+            index += 2;
+            continue;
+        }
+        if flag == "--ro-bind-src" {
+            let Some(src) = args.get(index + 1) else {
+                return Err(Some("missing --ro-bind-src value".to_string()));
+            };
+            if args.get(index + 2).map(OsString::as_os_str)
+                != Some(std::ffi::OsStr::new("--ro-bind-dst"))
+            {
+                return Err(Some(
+                    "missing --ro-bind-dst after --ro-bind-src".to_string(),
+                ));
+            }
+            let Some(dst) = args.get(index + 3) else {
+                return Err(Some("missing --ro-bind-dst value".to_string()));
+            };
+            ro_binds.push((PathBuf::from(src), PathBuf::from(dst)));
+            index += 4;
+            continue;
+        }
+        return Err(Some(format!(
+            "unknown assemble option {}",
+            flag.to_string_lossy()
+        )));
+    }
+    let Some(rootfs) = rootfs else {
+        return Err(None);
+    };
+    Ok(AssembleArgs { rootfs, ro_binds })
 }
 
 /// Write one line to standard error without ever panicking.
@@ -887,46 +1260,34 @@ pub fn init_main(args: &[OsString]) -> i32 {
             errno,
             strerror(errno)
         );
-        let opts_end = args
-            .iter()
-            .position(|arg| arg.as_os_str() == "--")
-            .unwrap_or(args.len());
-        return match opt_parsed(&args[..opts_end], "--status-fd") {
+        return match extract_status_fd(args) {
             Some(fd) => fail(fd, &detail),
             None => 1,
         };
     }
-    let sep = match args.iter().position(|arg| arg.as_os_str() == "--") {
-        Some(index) => index,
-        None => return 1,
+    let parsed = match parse_init_args(args) {
+        Ok(parsed) => parsed,
+        Err(InitParseFailure::Silent) => return 1,
+        Err(InitParseFailure::PreparedRoot(fd, detail)) => {
+            return fail(fd, &format!("the prepared root failed, {}", detail));
+        }
+        Err(InitParseFailure::NoCommand(fd)) => {
+            return fail(fd, "no command was given");
+        }
     };
-    let opts = &args[..sep];
-    let command = &args[sep + 1..];
-    let rootfs = match opt_value(opts, "--rootfs") {
-        Some(value) => PathBuf::from(value),
-        None => return 1,
-    };
-    let status_fd: i32 = match opt_parsed(opts, "--status-fd") {
-        Some(fd) => fd,
-        None => return 1,
-    };
-    // The hidden ceiling options the supervisor placed after
-    // the status descriptor option, present only where the
-    // caller set the bound. A value that does not read as a
-    // count names no ceiling, as an absent option does not,
-    // because the supervisor writes only counts it validated.
-    let max_cpu_seconds: Option<u64> = opt_parsed(opts, "--max-cpu");
-    let max_memory_bytes: Option<u64> = opt_parsed(opts, "--max-memory");
-    if command.is_empty() {
-        return fail(status_fd, "no command was given");
-    }
+    let rootfs = parsed.rootfs;
+    let status_fd = parsed.status_fd;
+    let max_cpu_seconds = parsed.max_cpu_seconds;
+    let max_memory_bytes = parsed.max_memory_bytes;
+    let ro_binds = parsed.ro_binds;
+    let command = &parsed.command;
     // The internal token rode in with the environment the
     // supervisor built. It has done its work of naming this
     // process as one of the run's own children, and it leaves
     // the environment here, before the assembly and the task,
     // so no process inside the sandbox can read it.
     std::env::remove_var(crate::INTERNAL_TOKEN_ENV);
-    let assembled = assemble_root(&rootfs)
+    let assembled = assemble_root_os(&rootfs, &ro_binds)
         .and_then(|proc_mounted| set_hostname().map(|_| proc_mounted))
         .and_then(|proc_mounted| enter_root(&rootfs).map(|_| proc_mounted))
         .and_then(|proc_mounted| {
@@ -966,11 +1327,15 @@ pub fn assemble_root_main(args: &[OsString]) -> i32 {
     if token_refusal("__assemble-root") {
         return 1;
     }
-    let rootfs = match opt_value(args, "--rootfs") {
-        Some(value) => PathBuf::from(value),
-        None => return 1,
+    let parsed = match parse_assemble_args(args) {
+        Ok(parsed) => parsed,
+        Err(None) => return 1,
+        Err(Some(detail)) => {
+            report_line(&format!("the prepared root failed, {}", detail));
+            return 1;
+        }
     };
-    match assemble_root(&rootfs) {
+    match assemble_root_os(&parsed.rootfs, &parsed.ro_binds) {
         Ok(_) => 0,
         Err(detail) => {
             report_line(&format!("the prepared root failed, {}", detail));

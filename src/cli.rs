@@ -12,8 +12,9 @@
 //! and task_exit_code fields tell a signal death from an
 //! exit at the same code.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use crate::{
@@ -21,7 +22,7 @@ use crate::{
     MAX_CPU_FLOOR_SECONDS, MAX_MEMORY_FLOOR_BYTES, TIMEOUT_FLOOR_SECONDS,
 };
 
-const USAGE: &str = "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--net] [--timeout SECONDS] [--max-cpu SECONDS] [--max-memory BYTES] -- COMMAND...";
+const USAGE: &str = "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--ro-bind HOST:SANDBOX]... [--net] [--timeout SECONDS] [--max-cpu SECONDS] [--max-memory BYTES] -- COMMAND...";
 
 /// Read one bound option value in the refusal classes the
 /// command line uses for every value it takes. A missing
@@ -114,6 +115,29 @@ fn string_value(value: Option<OsString>, name: &str, err: &mut dyn Write) -> Res
 /// program name. Output goes to the two writers, and the return
 /// value is the process exit code.
 pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    if args.len() == 1 {
+        let sole = args[0].as_os_str();
+        if sole == "-h" || sole == "--help" {
+            if writeln!(out, "{}", USAGE)
+                .and_then(|_| out.flush())
+                .is_err()
+            {
+                let _ = writeln!(err, "mayfly could not write its output");
+                return HARNESS_EXIT_CODE;
+            }
+            return 0;
+        }
+        if sole == "-V" || sole == "--version" {
+            if writeln!(out, "mayfly {}", env!("CARGO_PKG_VERSION"))
+                .and_then(|_| out.flush())
+                .is_err()
+            {
+                let _ = writeln!(err, "mayfly could not write its output");
+                return HARNESS_EXIT_CODE;
+            }
+            return 0;
+        }
+    }
     if args.is_empty() || args[0].as_os_str() != "run" {
         let _ = writeln!(err, "{}", USAGE);
         return 2;
@@ -122,6 +146,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
     let mut root: Option<PathBuf> = None;
     let mut backend = "namespace".to_string();
     let mut allow_env: Vec<OsString> = Vec::new();
+    let mut ro_binds: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut network = false;
     let mut timeout_seconds: Option<u64> = None;
     let mut max_cpu_seconds: Option<u64> = None;
@@ -167,6 +192,32 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
                 match string_value(option_value(rest, index), "--allow-env", err) {
                     Ok(value) => allow_env.push(value),
                     Err(code) => return code,
+                }
+                index += 2;
+            }
+            "--ro-bind" => {
+                let raw = match string_value(option_value(rest, index), "--ro-bind", err) {
+                    Ok(value) => value,
+                    Err(code) => return code,
+                };
+                let bytes = raw.as_os_str().as_bytes();
+                let Some(colon) = bytes.iter().position(|&b| b == b':') else {
+                    let _ = writeln!(err, "mayfly run needs --ro-bind in HOST:SANDBOX form");
+                    return 2;
+                };
+                let host_bytes = &bytes[..colon];
+                let sandbox_bytes = &bytes[colon + 1..];
+                if host_bytes.is_empty() || sandbox_bytes.is_empty() {
+                    let _ = writeln!(err, "mayfly run needs --ro-bind in HOST:SANDBOX form");
+                    return 2;
+                }
+                ro_binds.push((
+                    PathBuf::from(OsStr::from_bytes(host_bytes)),
+                    PathBuf::from(OsStr::from_bytes(sandbox_bytes)),
+                ));
+                if let Err(detail) = crate::namespace::validate_ro_bind_destinations(&ro_binds) {
+                    let _ = writeln!(err, "mayfly run refused --ro-bind, {}", detail);
+                    return 2;
                 }
                 index += 2;
             }
@@ -247,6 +298,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
     }
     let mut spec = RunSpec::new(command.clone(), root);
     spec.allow_env = allow_env;
+    spec.ro_binds = ro_binds;
     spec.network = network;
     spec.timeout_seconds = timeout_seconds;
     spec.max_cpu_seconds = max_cpu_seconds;
