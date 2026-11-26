@@ -3381,7 +3381,8 @@ fn cli_refuses_the_malformed_call_shapes_at_2() {
     // the command and runs it.
     ensure_helper();
     let tmp = Tmp::new("cli-malformed");
-    let usage = "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--net] [--timeout SECONDS] [--max-cpu SECONDS] [--max-memory BYTES] -- COMMAND...\n";
+    // Mechanical update for obligation MF-14 adding [--ro-bind HOST:SANDBOX]... to USAGE.
+    let usage = "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--ro-bind HOST:SANDBOX]... [--net] [--timeout SECONDS] [--max-cpu SECONDS] [--max-memory BYTES] -- COMMAND...\n";
     let root = tmp.path().as_os_str().to_os_string();
     let shapes: Vec<(Vec<OsString>, String)> = vec![
         (vec![], usage.to_string()),
@@ -4909,4 +4910,762 @@ fn the_report_writer_prints_a_whole_float_with_its_decimal_point() {
     report.timings_ms.total = Some(104.0);
     let text = report.to_json();
     assert!(text.contains("\"total\": 104.0"), "{}", text);
+}
+
+struct FailingWriter;
+
+impl Write for FailingWriter {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "simulated broken output",
+        ))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "simulated broken output",
+        ))
+    }
+}
+
+#[test]
+fn mf14_cli_help_and_version_flags_and_broken_stdout() {
+    let expected_usage = "usage: mayfly run --root DIR [--backend NAME] [--allow-env KEY]... [--ro-bind HOST:SANDBOX]... [--net] [--timeout SECONDS] [--max-cpu SECONDS] [--max-memory BYTES] -- COMMAND...\n";
+    let expected_version = format!("mayfly {}\n", env!("CARGO_PKG_VERSION"));
+
+    for flag in ["-h", "--help"] {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = cli_main(&[os(flag)], &mut out, &mut err);
+        assert_eq!(code, 0, "flag {flag}");
+        assert_eq!(String::from_utf8(out).unwrap(), expected_usage);
+        assert!(err.is_empty());
+    }
+    for flag in ["-V", "--version"] {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = cli_main(&[os(flag)], &mut out, &mut err);
+        assert_eq!(code, 0, "flag {flag}");
+        assert_eq!(String::from_utf8(out).unwrap(), expected_version);
+        assert!(err.is_empty());
+    }
+    for bad in [
+        vec![os("-h"), os("run")],
+        vec![os("--help"), os("extra")],
+        vec![os("-V"), os("extra")],
+        vec![os("--version"), os("extra")],
+        vec![os("--version=1")],
+    ] {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = cli_main(&bad, &mut out, &mut err);
+        assert_eq!(code, 2, "{bad:?}");
+        assert!(out.is_empty());
+        assert_eq!(String::from_utf8(err).unwrap(), expected_usage);
+    }
+    for flag in ["-h", "--help", "-V", "--version"] {
+        let mut out = FailingWriter;
+        let mut err: Vec<u8> = Vec::new();
+        let code = cli_main(&[os(flag)], &mut out, &mut err);
+        assert_eq!(code, HARNESS_EXIT_CODE, "flag {flag}");
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "mayfly could not write its output\n"
+        );
+    }
+}
+
+#[test]
+fn mf14_ro_bind_refuses_bad_cli_syntax_and_bad_sources_and_destinations_before_prepare() {
+    ensure_helper();
+    let tmp = Tmp::new("mf14-refusals");
+    let run_root = tmp.path().join("runs");
+    std::fs::create_dir_all(&run_root).unwrap();
+    let orphan = plant_sweepable(&run_root, "dddd44444444");
+    let real_dir = tmp.path().join("host-dir");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    let real_file = tmp.path().join("host-file.txt");
+    std::fs::write(&real_file, "synthetic input\n").unwrap();
+    let dir_str = real_dir.to_string_lossy().into_owned();
+    let file_str = real_file.to_string_lossy().into_owned();
+    let root_os = run_root.as_os_str().to_os_string();
+
+    // Parse-time CLI refusals at exit 2 with no report printed and zero run directories created.
+    let bad_cli_cases: Vec<(Vec<OsString>, &str)> = vec![
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "mayfly run needs a value after --ro-bind",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&dir_str),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "mayfly run needs --ro-bind in HOST:SANDBOX form",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(":/input"),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "mayfly run needs --ro-bind in HOST:SANDBOX form",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&format!("{dir_str}:")),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "mayfly run needs --ro-bind in HOST:SANDBOX form",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&format!("{dir_str}:relative")),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "must start with /",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&format!("{dir_str}:/input/./a")),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "cannot contain dot or parent segments",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&format!("{dir_str}:/input/../a")),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "cannot contain dot or parent segments",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&format!("{dir_str}:/")),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "destination / is reserved",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&format!("{dir_str}:/work")),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "destination /work is reserved",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&format!("{dir_str}:/inputs")),
+                os("--ro-bind"),
+                os(&format!("{file_str}:/inputs/")),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "named more than once",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&format!("{dir_str}:/inputs")),
+                os("--ro-bind"),
+                os(&format!("{file_str}:/inputs/sub")),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "overlap",
+        ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&format!("{file_str}:/inputs/sub")),
+                os("--ro-bind"),
+                os(&format!("{dir_str}:/inputs")),
+                os("--"),
+                os("/bin/true"),
+            ],
+            "overlap",
+        ),
+    ];
+    for (args, expected) in bad_cli_cases {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = cli_main(&args, &mut out, &mut err);
+        assert_eq!(code, 2, "{args:?} err {}", String::from_utf8_lossy(&err));
+        assert!(out.is_empty());
+        assert!(
+            String::from_utf8_lossy(&err).contains(expected),
+            "expected {expected} in {}",
+            String::from_utf8_lossy(&err)
+        );
+    }
+
+    for reserved in [
+        "/.oldroot",
+        "/proc",
+        "/proc/self",
+        "/dev",
+        "/dev/null",
+        "/sys",
+        "/usr",
+        "/usr/local",
+        "/etc",
+        "/etc/hosts",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/tmp",
+        "/tmp/sub",
+    ] {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = cli_main(
+            &[
+                os("run"),
+                os("--root"),
+                root_os.clone(),
+                os("--ro-bind"),
+                os(&format!("{dir_str}:{reserved}")),
+                os("--"),
+                os("/bin/true"),
+            ],
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 2, "reserved {reserved}");
+        assert!(out.is_empty());
+        assert!(String::from_utf8_lossy(&err).contains("reserved"));
+    }
+    assert_eq!(glob_run_dirs(&run_root), vec![orphan.clone()]);
+
+    // Pre-prepare NamespaceBackend refusals on missing, symlink, trailing-slash symlink, FIFO, and NUL/structural specs.
+    let link_to_dir = tmp.path().join("link-dir");
+    std::os::unix::fs::symlink(&real_dir, &link_to_dir).unwrap();
+    let link_to_dir_slash = PathBuf::from(format!("{}/", link_to_dir.display()));
+    let link_to_dir_dot = PathBuf::from(format!("{}/.", link_to_dir.display()));
+    let link_to_dir_dotdot = PathBuf::from(format!("{}/..", link_to_dir.display()));
+    let link_to_file = tmp.path().join("link-file");
+    std::os::unix::fs::symlink(&real_file, &link_to_file).unwrap();
+    let link_to_file_slash = PathBuf::from(format!("{}/", link_to_file.display()));
+    let real_file_slash = PathBuf::from(format!("{}/", real_file.display()));
+    let fifo_path = tmp.path().join("pipe-src");
+    mkfifo(&fifo_path);
+    let missing_path = tmp.path().join("does-not-exist");
+
+    let preparations: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let record = preparations.clone();
+    let mut backend = NamespaceBackend::new();
+    backend.provenance_writer = Some(Arc::new(move |dir: &Path, _run_id: &str| {
+        record.lock().unwrap().push(dir.to_path_buf());
+        Ok(())
+    }));
+    let bad_specs: Vec<(Vec<(PathBuf, PathBuf)>, &str)> = vec![
+        (
+            vec![(missing_path.clone(), PathBuf::from("/inputs"))],
+            "does not exist",
+        ),
+        (
+            vec![(link_to_dir, PathBuf::from("/inputs"))],
+            "is a symbolic link",
+        ),
+        (
+            vec![(link_to_dir_slash, PathBuf::from("/inputs"))],
+            "is a symbolic link",
+        ),
+        (
+            vec![(link_to_dir_dot, PathBuf::from("/inputs"))],
+            "is a symbolic link",
+        ),
+        (
+            vec![(link_to_dir_dotdot, PathBuf::from("/inputs"))],
+            "is a symbolic link",
+        ),
+        (
+            vec![(link_to_file, PathBuf::from("/inputs"))],
+            "is a symbolic link",
+        ),
+        (
+            vec![(link_to_file_slash, PathBuf::from("/inputs"))],
+            "is a symbolic link",
+        ),
+        (
+            vec![(real_file_slash, PathBuf::from("/inputs"))],
+            "names a directory form on a non-directory",
+        ),
+        (
+            vec![(fifo_path, PathBuf::from("/inputs"))],
+            "not a regular file or directory",
+        ),
+        (
+            vec![(PathBuf::new(), PathBuf::from("/inputs"))],
+            "source path is empty",
+        ),
+        (
+            vec![(
+                PathBuf::from(OsString::from_vec(b"/tmp/a\0b".to_vec())),
+                PathBuf::from("/inputs"),
+            )],
+            "contains a NUL byte",
+        ),
+        (
+            vec![(
+                real_dir.clone(),
+                PathBuf::from(OsString::from_vec(b"/inputs\0bad".to_vec())),
+            )],
+            "contains a NUL byte",
+        ),
+        (
+            vec![(real_dir.clone(), PathBuf::from("rel"))],
+            "must start with /",
+        ),
+    ];
+    for (binds, expected) in bad_specs {
+        let mut s = RunSpec::new(cmd(&["/bin/true"]), run_root.clone());
+        s.ro_binds = binds;
+        let rep = backend.run(&s);
+        assert_eq!(rep.outcome, Outcome::HarnessError);
+        assert_eq!(rep.run_id, "");
+        assert_eq!(rep.sandbox_dir, "");
+        assert!(rep.timings_ms.prepare.is_none());
+        let err_text = rep.error.unwrap();
+        assert!(!err_text.starts_with("prepare"), "{err_text}");
+        assert!(
+            err_text.contains(expected),
+            "expected {expected} in {err_text}"
+        );
+    }
+    assert!(preparations.lock().unwrap().is_empty());
+
+    // CLI invocation with a missing host source answers exit 125 with an early HarnessError JSON report and leaves orphan untouched.
+    let mut cli_out: Vec<u8> = Vec::new();
+    let mut cli_err: Vec<u8> = Vec::new();
+    let cli_code = cli_main(
+        &[
+            os("run"),
+            os("--root"),
+            root_os,
+            os("--ro-bind"),
+            os(&format!("{}:/inputs", missing_path.display())),
+            os("--"),
+            os("/bin/true"),
+        ],
+        &mut cli_out,
+        &mut cli_err,
+    );
+    assert_eq!(cli_code, HARNESS_EXIT_CODE);
+    assert!(cli_err.is_empty());
+    let parsed_rep: serde_json::Value = serde_json::from_slice(&cli_out).unwrap();
+    assert_eq!(parsed_rep["outcome"], "harness_error");
+    assert_eq!(parsed_rep["run_id"], "");
+    assert!(parsed_rep["timings_ms"]["prepare"].is_null());
+    assert!(parsed_rep["error"]
+        .as_str()
+        .unwrap()
+        .contains("does not exist"));
+    assert_eq!(glob_run_dirs(&run_root), vec![orphan.clone()]);
+    assert_eq!(
+        std::fs::read_to_string(orphan.join(".mayfly-provenance")).unwrap(),
+        "dddd44444444\n"
+    );
+}
+
+#[test]
+fn mf14_assemble_root_with_binds_mounts_tmp_tmpfs_and_read_only_binds_in_order() {
+    let tmp = Tmp::new("mf14-assemble-order");
+    let sandbox = tmp.path().join("run-mf1400000001");
+    let rootfs = sandbox.join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    let host_dir = tmp.path().join("src-dir");
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let host_file = tmp.path().join("src-file.txt");
+    std::fs::write(&host_file, "payload\n").unwrap();
+
+    type MountCall = (Option<String>, String, Option<String>, u64, Option<String>);
+    let log: std::cell::RefCell<Vec<MountCall>> = std::cell::RefCell::new(Vec::new());
+    let record_mount =
+        |src: Option<&str>, target: &str, fstype: Option<&str>, flags: u64| -> Result<(), String> {
+            log.borrow_mut().push((
+                src.map(str::to_string),
+                target.to_string(),
+                fstype.map(str::to_string),
+                flags,
+                None,
+            ));
+            Ok(())
+        };
+    let record_mount_opts = |src: Option<&str>,
+                             target: &str,
+                             fstype: Option<&str>,
+                             flags: u64,
+                             data: Option<&str>|
+     -> Result<(), String> {
+        log.borrow_mut().push((
+            src.map(str::to_string),
+            target.to_string(),
+            fstype.map(str::to_string),
+            flags,
+            data.map(str::to_string),
+        ));
+        Ok(())
+    };
+
+    let binds = vec![
+        (
+            host_dir.join("..").join("src-dir"),
+            PathBuf::from("/inputs/tree"),
+        ),
+        (
+            host_dir.join(".").join("..").join("src-file.txt"),
+            PathBuf::from("/work/readonly.cfg"),
+        ),
+    ];
+    let res =
+        mayfly::init::assemble_root_with_binds(&rootfs, &binds, &record_mount, &record_mount_opts);
+    assert!(res.is_ok(), "{res:?}");
+    assert!(rootfs.join("inputs").join("tree").is_dir());
+    assert!(rootfs.join("work").join("readonly.cfg").is_file());
+
+    let entries = log.into_inner();
+    let work_target = rootfs.join("work").to_string_lossy().into_owned();
+    let tmp_target = rootfs.join("tmp").to_string_lossy().into_owned();
+    let dir_target = rootfs.join("inputs/tree").to_string_lossy().into_owned();
+    let file_target = rootfs
+        .join("work/readonly.cfg")
+        .to_string_lossy()
+        .into_owned();
+
+    let work_idx = entries
+        .iter()
+        .position(|(src, tgt, fs, _, _)| {
+            src.as_deref() == Some("tmpfs") && tgt == &work_target && fs.as_deref() == Some("tmpfs")
+        })
+        .expect("work tmpfs mount");
+    let tmp_idx = entries
+        .iter()
+        .position(|(src, tgt, fs, flags, data)| {
+            src.as_deref() == Some("tmpfs")
+                && tgt == &tmp_target
+                && fs.as_deref() == Some("tmpfs")
+                && *flags == 0
+                && data.as_deref() == Some("mode=1777")
+        })
+        .expect("tmp tmpfs mount with mode=1777");
+    let clean_dir = std::path::absolute(host_dir.join("..").join("src-dir")).unwrap();
+    let clean_file =
+        std::path::absolute(host_dir.join(".").join("..").join("src-file.txt")).unwrap();
+    let dir_bind_idx = entries
+        .iter()
+        .position(|(src, tgt, _, flags, _)| {
+            src.as_deref() == Some(clean_dir.to_string_lossy().as_ref())
+                && tgt == &dir_target
+                && *flags == (mayfly::init::MS_BIND | mayfly::init::MS_REC)
+        })
+        .expect("directory recursive bind mount");
+    let file_bind_idx = entries
+        .iter()
+        .position(|(src, tgt, _, flags, _)| {
+            src.as_deref() == Some(clean_file.to_string_lossy().as_ref())
+                && tgt == &file_target
+                && *flags == mayfly::init::MS_BIND
+        })
+        .expect("regular file bind mount");
+
+    assert!(work_idx < tmp_idx);
+    assert!(tmp_idx < dir_bind_idx);
+    assert!(dir_bind_idx < file_bind_idx);
+
+    // Symlink targets at parent, directory leaf, and file leaf positions as well as pre-existing file targets are refused without touching outside paths.
+    let outside_dir = tmp.path().join("outside-dir");
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let outside_file = tmp.path().join("outside-file.txt");
+    std::fs::write(&outside_file, "untouched\n").unwrap();
+
+    let noop_m =
+        |_: Option<&str>, _: &str, _: Option<&str>, _: u64| -> Result<(), String> { Ok(()) };
+    let noop_mo = |_: Option<&str>,
+                   _: &str,
+                   _: Option<&str>,
+                   _: u64,
+                   _: Option<&str>|
+     -> Result<(), String> { Ok(()) };
+
+    // Planted symlink at intermediate parent directory inside rootfs.
+    let r_parent = tmp.path().join("run-mf1400000002").join("rootfs");
+    std::fs::create_dir_all(&r_parent).unwrap();
+    std::os::unix::fs::symlink(&outside_dir, r_parent.join("inputs")).unwrap();
+    let err_parent = mayfly::init::assemble_root_with_binds(
+        &r_parent,
+        &[(host_dir.clone(), PathBuf::from("/inputs/tree"))],
+        &noop_m,
+        &noop_mo,
+    )
+    .unwrap_err();
+    assert!(err_parent.contains("Errno"), "{err_parent}");
+    assert!(!outside_dir.join("tree").exists());
+
+    // Planted symlink at directory target leaf inside rootfs.
+    let r_dir_leaf = tmp.path().join("run-mf1400000003").join("rootfs");
+    std::fs::create_dir_all(r_dir_leaf.join("inputs")).unwrap();
+    std::os::unix::fs::symlink(&outside_dir, r_dir_leaf.join("inputs/tree")).unwrap();
+    let err_dir_leaf = mayfly::init::assemble_root_with_binds(
+        &r_dir_leaf,
+        &[(host_dir.clone(), PathBuf::from("/inputs/tree"))],
+        &noop_m,
+        &noop_mo,
+    )
+    .unwrap_err();
+    assert!(err_dir_leaf.contains("Errno"), "{err_dir_leaf}");
+
+    // Planted symlink at regular-file target leaf inside rootfs.
+    let r_file_leaf = tmp.path().join("run-mf1400000004").join("rootfs");
+    std::fs::create_dir_all(r_file_leaf.join("inputs")).unwrap();
+    std::os::unix::fs::symlink(&outside_file, r_file_leaf.join("inputs/cfg")).unwrap();
+    let err_file_leaf = mayfly::init::assemble_root_with_binds(
+        &r_file_leaf,
+        &[(host_file.clone(), PathBuf::from("/inputs/cfg"))],
+        &noop_m,
+        &noop_mo,
+    )
+    .unwrap_err();
+    assert!(err_file_leaf.contains("Errno"), "{err_file_leaf}");
+    assert_eq!(
+        std::fs::read_to_string(&outside_file).unwrap(),
+        "untouched\n"
+    );
+
+    // Pre-existing regular file at regular-file target leaf is refused rather than reused.
+    let r_preexist = tmp.path().join("run-mf1400000005").join("rootfs");
+    std::fs::create_dir_all(r_preexist.join("inputs")).unwrap();
+    std::fs::write(r_preexist.join("inputs/cfg"), "planted\n").unwrap();
+    let err_preexist = mayfly::init::assemble_root_with_binds(
+        &r_preexist,
+        &[(host_file.clone(), PathBuf::from("/inputs/cfg"))],
+        &noop_m,
+        &noop_mo,
+    )
+    .unwrap_err();
+    assert!(err_preexist.contains("Errno"), "{err_preexist}");
+
+    // Trailing-slash directory symlink passed directly to assemble_root_with_binds is refused.
+    let sym_dir = tmp.path().join("sym-src-dir");
+    std::os::unix::fs::symlink(&host_dir, &sym_dir).unwrap();
+    let r_sym_src = tmp.path().join("run-mf1400000006").join("rootfs");
+    std::fs::create_dir_all(&r_sym_src).unwrap();
+    let err_sym_src = mayfly::init::assemble_root_with_binds(
+        &r_sym_src,
+        &[(
+            PathBuf::from(format!("{}/", sym_dir.display())),
+            PathBuf::from("/inputs/tree"),
+        )],
+        &noop_m,
+        &noop_mo,
+    )
+    .unwrap_err();
+    assert!(err_sym_src.contains("symbolic link"), "{err_sym_src}");
+
+    // Sequential option parser on __assemble-root refuses orphan --ro-bind-dst without touching rootfs.
+    let r_orphan_opt = tmp.path().join("run-mf1400000007").join("rootfs");
+    let genuine = "ab".repeat(16);
+    let orphan_out = Command::new(mayfly_bin())
+        .arg("__assemble-root")
+        .arg("--rootfs")
+        .arg(r_orphan_opt.as_os_str())
+        .arg("--ro-bind-dst")
+        .arg("/inputs")
+        .env(mayfly::INTERNAL_TOKEN_ENV, &genuine)
+        .output()
+        .unwrap();
+    assert_eq!(orphan_out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&orphan_out.stderr).contains("unknown assemble option"),
+        "{}",
+        String::from_utf8_lossy(&orphan_out.stderr)
+    );
+    assert!(!r_orphan_opt.exists());
+}
+
+#[test]
+fn mf14_linux_tmp_tmpfs_and_ro_bind_directory_and_file_end_to_end() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("mf14-linux-live");
+    let run_root = tmp.path().join("runs");
+    std::fs::create_dir_all(&run_root).unwrap();
+
+    let host_dir = tmp.path().join("corpus");
+    std::fs::create_dir_all(host_dir.join("sub")).unwrap();
+    std::fs::write(host_dir.join("sub/item.txt"), "alpha-item\n").unwrap();
+
+    let host_sibling = tmp.path().join("corpus-extra");
+    std::fs::create_dir_all(&host_sibling).unwrap();
+    std::fs::write(host_sibling.join("extra.txt"), "extra-item\n").unwrap();
+
+    let host_file = tmp.path().join("policy.json");
+    std::fs::write(&host_file, "{\"mode\":\"strict\"}\n").unwrap();
+
+    // Non-UTF-8 regular file path alongside a U+FFFD symlink decoy proves byte-exact mounting without lossy substitution.
+    let raw_host_file = tmp
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"raw_\xff.txt"));
+    std::fs::write(&raw_host_file, "raw-bytes-ok\n").unwrap();
+    let decoy_target = tmp.path().join("decoy-secret.txt");
+    std::fs::write(&decoy_target, "DECOY_LEAKED\n").unwrap();
+    let decoy_link = tmp.path().join("raw_\u{fffd}.txt");
+    std::os::unix::fs::symlink(&decoy_target, &decoy_link).unwrap();
+    let mut raw_bind_arg = raw_host_file.as_os_str().as_bytes().to_vec();
+    raw_bind_arg.extend_from_slice(b":/work/ro/raw_\xff.txt");
+
+    let dir_before = snapshot_tree(&host_dir);
+    let file_before = std::fs::read(&host_file).unwrap();
+    let raw_before = std::fs::read(&raw_host_file).unwrap();
+    let mounts_before = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+
+    let probe_py = r#"
+import errno, json, os, stat
+root_st = os.stat('/')
+work_st = os.stat('/work')
+tmp_st = os.stat('/tmp')
+with open('/tmp/ephemeral.txt', 'w') as fh:
+    fh.write('scratch\n')
+with open('/work/writable.txt', 'w') as fh:
+    fh.write('work-ok\n')
+item = open('/inputs/sub/item.txt').read().strip()
+extra = open('/inputs_extra/extra.txt').read().strip()
+policy = open('/work/ro/policy.json').read().strip()
+raw_val = open(b'/work/ro/raw_\xff.txt', 'rb').read().decode('utf-8').strip()
+
+def write_errno(path):
+    try:
+        with open(path, 'wb') as fh:
+            fh.write(b'tamper')
+        return 0
+    except OSError as exc:
+        return exc.errno
+
+print(json.dumps({
+    'tmp_distinct_root': tmp_st.st_dev != root_st.st_dev,
+    'tmp_distinct_work': tmp_st.st_dev != work_st.st_dev,
+    'tmp_mode': stat.S_IMODE(tmp_st.st_mode),
+    'item': item,
+    'extra': extra,
+    'policy': policy,
+    'raw_val': raw_val,
+    'err_dir_new': write_errno(b'/inputs/new.txt'),
+    'err_dir_mod': write_errno(b'/inputs/sub/item.txt'),
+    'err_file_mod': write_errno(b'/work/ro/policy.json'),
+    'err_raw_mod': write_errno(b'/work/ro/raw_\xff.txt'),
+}))
+"#;
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut err: Vec<u8> = Vec::new();
+    let code = cli_main(
+        &[
+            os("run"),
+            os("--root"),
+            run_root.as_os_str().to_os_string(),
+            os("--ro-bind"),
+            os(&format!("{}:/inputs", host_dir.display())),
+            os("--ro-bind"),
+            os(&format!("{}:/inputs_extra", host_sibling.display())),
+            os("--ro-bind"),
+            os(&format!("{}:/work/ro/policy.json", host_file.display())),
+            os("--ro-bind"),
+            OsString::from_vec(raw_bind_arg),
+            os("--"),
+            py(),
+            os("-c"),
+            os(probe_py),
+        ],
+        &mut out,
+        &mut err,
+    );
+    assert_eq!(code, 0, "stderr {}", String::from_utf8_lossy(&err));
+    assert!(err.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(report["outcome"], "task");
+    assert_eq!(report["sandbox_removed"], true);
+    let inner: serde_json::Value =
+        serde_json::from_str(report["stdout_tail"].as_str().unwrap().trim()).unwrap();
+    assert_eq!(inner["tmp_distinct_root"], true);
+    assert_eq!(inner["tmp_distinct_work"], true);
+    assert_eq!(inner["tmp_mode"], 0o1777);
+    assert_eq!(inner["item"], "alpha-item");
+    assert_eq!(inner["extra"], "extra-item");
+    assert_eq!(inner["policy"], "{\"mode\":\"strict\"}");
+    assert_eq!(inner["raw_val"], "raw-bytes-ok");
+    assert_eq!(inner["err_dir_new"], libc::EROFS);
+    assert_eq!(inner["err_dir_mod"], libc::EROFS);
+    assert_eq!(inner["err_file_mod"], libc::EROFS);
+    assert_eq!(inner["err_raw_mod"], libc::EROFS);
+
+    assert_eq!(snapshot_tree(&host_dir), dir_before);
+    assert_eq!(std::fs::read(&host_file).unwrap(), file_before);
+    assert_eq!(std::fs::read(&raw_host_file).unwrap(), raw_before);
+    assert_eq!(
+        std::fs::read_to_string(&decoy_target).unwrap(),
+        "DECOY_LEAKED\n"
+    );
+    let mounts_after = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    assert_eq!(mounts_before, mounts_after);
+    assert!(glob_run_dirs(&run_root).is_empty());
 }
