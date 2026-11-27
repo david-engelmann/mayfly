@@ -153,6 +153,7 @@ fn run_commands(text: &str, job_name: &str) -> Vec<String> {
     let mut step_lines: Vec<String> = Vec::new();
     let mut in_steps = false;
     let mut in_job = false;
+    let mut job_indent = 0;
     let mut job_disabled = false;
     for line in text.lines() {
         let stripped = line.trim();
@@ -161,7 +162,14 @@ fn run_commands(text: &str, job_name: &str) -> Vec<String> {
         }
         if stripped == job_head {
             in_job = true;
+            job_indent = line.len() - line.trim_start().len();
             continue;
+        }
+        if in_job {
+            let indent = line.len() - line.trim_start().len();
+            if !stripped.is_empty() && indent <= job_indent && stripped.ends_with(':') {
+                break;
+            }
         }
         if in_job && !in_steps && stripped.starts_with("if:") {
             let value = stripped
@@ -176,7 +184,7 @@ fn run_commands(text: &str, job_name: &str) -> Vec<String> {
             }
             continue;
         }
-        if stripped == "steps:" {
+        if in_job && stripped == "steps:" {
             in_steps = true;
             continue;
         }
@@ -349,6 +357,39 @@ fn ci_gate_parser_rejects_a_job_disabled_with_if_false() {
     assert!(commands.iter().any(|c| c == SCAN_COMMAND));
     assert!(commands.iter().any(|c| c == FMT_COMMAND));
     assert!(commands.iter().any(|c| c == CLIPPY_COMMAND));
+}
+
+#[test]
+fn gate_parser_collects_only_the_named_jobs_commands() {
+    // MF-P73. run_commands takes the job name and its pins
+    // state a per job claim, that the named job runs the
+    // gate commands and yields none of them when that job
+    // is disabled, but collection itself stood file-wide,
+    // a steps block opening it wherever it stood and no
+    // span closing it, so a workflow whose four gate
+    // commands stand in a second job passed every commands
+    // pin while the named job ran no gate command at all.
+    // The staged texts carry the named job with the
+    // checkout and toolchain steps alone and the four gate
+    // commands in a second job, and the collection for the
+    // named job holds none of the four with the second job
+    // standing after it and none with it standing before.
+    let named_job = "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8\n        with:\n          toolchain: \"1.91.1\"\n          components: rustfmt, clippy\n";
+    let gate_job = format!(
+        "  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Run the local gate\n        run: {GATE_COMMAND}\n      - name: Run the codepoint scan\n        run: {SCAN_COMMAND}\n      - name: Check the formatting\n        run: {FMT_COMMAND}\n      - name: Run the linter\n        run: {CLIPPY_COMMAND}\n"
+    );
+    let head =
+        "name: CI\n\non:\n  push:\n  pull_request:\n\npermissions:\n  contents: read\n\njobs:\n";
+    for text in [
+        format!("{head}{named_job}{gate_job}"),
+        format!("{head}{gate_job}{named_job}"),
+    ] {
+        let commands = run_commands(&text, "test");
+        assert!(!commands.iter().any(|c| c == GATE_COMMAND));
+        assert!(!commands.iter().any(|c| c == SCAN_COMMAND));
+        assert!(!commands.iter().any(|c| c == FMT_COMMAND));
+        assert!(!commands.iter().any(|c| c == CLIPPY_COMMAND));
+    }
 }
 
 struct ScanOutput {
