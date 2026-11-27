@@ -3356,6 +3356,40 @@ fn a_nul_byte_in_an_allowlisted_environment_value_is_a_harness_error() {
 }
 
 #[test]
+fn a_nul_byte_in_an_allowlisted_environment_key_is_a_harness_error() {
+    // MF-P74. The scan that refuses a NUL byte before the
+    // spawn tests every environment pair's key beside its
+    // value, and the value member stands pinned above. A key
+    // carrying the byte reaches the scan the same way, the
+    // caller's snapshot carrying the key against a clean
+    // value, and the harness refuses it in the same words. A
+    // scan testing the pairs' values alone passes every
+    // standing pin and lets this key through to the spawn.
+    let tmp = Tmp::new("env-nul-key");
+    ensure_helper();
+    let backend = match NamespaceBackend::new().unshare_path {
+        Some(path) => NamespaceBackend::with_unshare_path(Some(path)),
+        None => NamespaceBackend::with_unshare_path(Some(write_fake_unshare(
+            &tmp.path().join("fakebin"),
+        ))),
+    };
+    let bad_key = OsString::from_vec(b"MAYFLY_KE\0EP_ME".to_vec());
+    let mut task_spec = spec(vec![py()], tmp.path());
+    task_spec.allow_env = vec![bad_key.clone()];
+    task_spec.caller_env = vec![(bad_key, os("a clean value"))];
+    let report = backend.run(&task_spec);
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(report.task_exit_code, None);
+    assert_eq!(report.task_signal, None);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("could not launch unshare, embedded null byte")
+    );
+    assert_eq!(report.sandbox_removed, Some(true));
+    assert!(glob_run_dirs(tmp.path()).is_empty());
+}
+
+#[test]
 fn cli_reports_a_none_command_element_as_a_harness_error() {
     // The command list is handed to the command line entry
     // the way a caller of the library builds it, because
