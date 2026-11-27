@@ -38,10 +38,10 @@ Mayfly is a small Rust program that gives one task a disposable sandbox to run i
 
 ## Install
 
-Install from Crates.io or build from source with Cargo.
+Install the `mayfly` CLI on Linux from the `v0.2.0` git tag with Cargo, download prebuilt Linux `x86_64` and `aarch64` binary archives from [the v0.2.0 GitHub Release](https://github.com/david-engelmann/mayfly/releases/tag/v0.2.0), or build from source with Cargo.
 
 ```
-cargo install mayfly --bin mayfly
+cargo install --git https://github.com/david-engelmann/mayfly.git --tag v0.2.0 --bin mayfly
 ```
 
 From a local checkout, install the binary onto your path.
@@ -404,6 +404,16 @@ mayfly run --root /tmp/mayfly-runs --ro-bind ./corpus:/inputs --ro-bind ./policy
 ### Optional composition
 
 Mayfly is completely standalone and depends on zero sibling packages. In hosts that combine multiple tools, `portcullis` evaluates whether a proposed command may run, `deadbolt` redeems any approved scoped credential and passes only the target variable into `mayfly run --allow-env`, and `arvin` tracks progress proofs and spend ceilings across runs.
+
+## Guides and examples
+
+Read [docs/GUIDE.md](docs/GUIDE.md) for the operator and sandbox architecture guide covering Linux namespace isolation, prepared root layout with `/work` and private `/tmp`, `--ro-bind` read-only mounts, environment scrubbing and `--allow-env`, resource bounds, exit codes, and three-layer janitor and orphan-sweep cleanup. From a local checkout, run the self-contained Rust and Python quickstarters in [examples/quickstart.rs](examples/quickstart.rs) and [examples/sandbox_walkthrough.py](examples/sandbox_walkthrough.py).
+
+```
+cargo build --bin mayfly
+cargo run --example quickstart
+python3 examples/sandbox_walkthrough.py
+```
 
 ## Status
 
