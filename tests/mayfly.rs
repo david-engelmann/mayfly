@@ -5311,6 +5311,10 @@ fn mf14_ro_bind_refuses_bad_cli_syntax_and_bad_sources_and_destinations_before_p
             "does not exist",
         ),
         (
+            vec![(real_file.join("child"), PathBuf::from("/inputs"))],
+            "cannot be inspected",
+        ),
+        (
             vec![(link_to_dir, PathBuf::from("/inputs"))],
             "is a symbolic link",
         ),
