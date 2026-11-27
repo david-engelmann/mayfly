@@ -4866,6 +4866,16 @@ fn cli_unknown_backend_reports_the_full_report_shape() {
     assert_eq!(payload["sandbox_removed"], true);
     assert_eq!(payload["stdout_tail"], "");
     assert_eq!(payload["stderr_tail"], "");
+    let timing_fields: Vec<&str> = payload["timings_ms"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|key| key.as_str())
+        .collect();
+    assert_eq!(timing_fields, PHASE_NAMES);
+    for phase in PHASE_NAMES {
+        assert_eq!(payload["timings_ms"][phase], serde_json::Value::Null);
+    }
 }
 
 #[test]
