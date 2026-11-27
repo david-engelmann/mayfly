@@ -3426,6 +3426,19 @@ fn cli_treats_an_option_shaped_token_after_a_value_option_as_a_missing_value() {
             ],
             "mayfly run needs a value after --allow-env",
         ),
+        (
+            vec![
+                os("run"),
+                os("--root"),
+                tmp.path().as_os_str().to_os_string(),
+                os("--backend"),
+                os("--"),
+                py(),
+                os("-c"),
+                os("pass"),
+            ],
+            "mayfly run needs a value after --backend",
+        ),
     ];
     for (args, message) in shapes {
         let mut out: Vec<u8> = Vec::new();
