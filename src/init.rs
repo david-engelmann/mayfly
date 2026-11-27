@@ -67,6 +67,10 @@ fn errno_now() -> i32 {
     io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
+fn errno_pair(errno: i32) -> (i32, String) {
+    (errno, strerror(errno))
+}
+
 fn cstring(text: &str) -> CString {
     CString::new(text).unwrap_or_else(|_| CString::new("").expect("empty cstring"))
 }
@@ -606,8 +610,7 @@ fn drop_capabilities() -> Result<(), (i32, String)> {
             }; 2];
             let rc = libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr());
             if rc != 0 {
-                let errno = errno_now();
-                return Err((errno, strerror(errno)));
+                return Err(errno_pair(errno_now()));
             }
         }
         Ok(())
@@ -615,7 +618,7 @@ fn drop_capabilities() -> Result<(), (i32, String)> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (PR_CAPBSET_DROP, CAPSET_VERSION_3);
-        Err((libc::ENOSYS, strerror(libc::ENOSYS)))
+        Err(errno_pair(libc::ENOSYS))
     }
 }
 
@@ -704,8 +707,7 @@ fn set_task_limits(
                 rlim_max: seconds + 1,
             };
             if libc::setrlimit(libc::RLIMIT_CPU, &limit) != 0 {
-                let errno = errno_now();
-                return Err((errno, strerror(errno)));
+                return Err(errno_pair(errno_now()));
             }
         }
         if let Some(bytes) = max_memory_bytes {
@@ -714,8 +716,7 @@ fn set_task_limits(
                 rlim_max: bytes,
             };
             if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
-                let errno = errno_now();
-                return Err((errno, strerror(errno)));
+                return Err(errno_pair(errno_now()));
             }
         }
     }
@@ -755,12 +756,12 @@ fn supervise(
 ) -> i32 {
     let mut pipe_fds: [i32; 2] = [0, 0];
     if let Err(errno) = create_exec_pipe(&mut pipe_fds) {
+        let (errno, message) = errno_pair(errno);
         return fail(
             status_fd,
             &format!(
                 "could not start the task, could not create the exec pipe, {} {}",
-                errno,
-                strerror(errno)
+                errno, message
             ),
         );
     }
@@ -815,7 +816,7 @@ fn supervise(
                 Ok(()) => match drop_capabilities() {
                     Ok(()) => {
                         libc::execvp(file_ptr, argv_ptrs.as_ptr());
-                        Some((errno_now(), strerror(errno_now())))
+                        Some(errno_pair(errno_now()))
                     }
                     Err(err) => Some(err),
                 },
@@ -833,13 +834,12 @@ fn supervise(
         }
     }
     if child < 0 {
-        let errno = errno_now();
+        let (errno, message) = errno_pair(errno_now());
         return fail(
             status_fd,
             &format!(
                 "could not start the task, could not fork the task process, {} {}",
-                errno,
-                strerror(errno)
+                errno, message
             ),
         );
     }
