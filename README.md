@@ -38,7 +38,13 @@ Mayfly is a small Rust program that gives one task a disposable sandbox to run i
 
 ## Install
 
-Mayfly builds from source with Cargo. Clone the repo and install the binary onto your path.
+Install from Crates.io or build from source with Cargo.
+
+```
+cargo install mayfly --bin mayfly
+```
+
+From a local checkout, install the binary onto your path.
 
 ```
 git clone https://github.com/david-engelmann/mayfly.git
@@ -387,13 +393,25 @@ A busy task under a processor ceiling of 1 second died by the processor limit si
 mayfly run --root /tmp/mayfly-runs --max-cpu 1 -- /usr/bin/python3 -c "exec('while True:' + chr(10) + '    pass')"
 ```
 
+### Read-only host binds and /tmp
+
+Every sandbox mounts a private `tmpfs` with mode `01777` at `/tmp` alongside `/work`, so scratch files under `/tmp` stay isolated to that run and vanish when the sandbox exits. When a task needs read-only access to host files or directories, pass repeatable `--ro-bind` flags naming the host source and an absolute sandbox destination outside the reserved system trees. Each source is checked with `symlink_metadata` before any sandbox directory is prepared and locked read-only before `pivot_root`.
+
+```
+mayfly run --root /tmp/mayfly-runs --ro-bind ./corpus:/inputs --ro-bind ./policy.json:/work/ro/policy.json -- /bin/cat /inputs/item.txt
+```
+
+### Optional composition
+
+Mayfly is completely standalone and depends on zero sibling packages. In hosts that combine multiple tools, `portcullis` evaluates whether a proposed command may run, `deadbolt` redeems any approved scoped credential and passes only the target variable into `mayfly run --allow-env`, and `arvin` tracks progress proofs and spend ceilings across runs.
+
 ## Status
 
 The namespace backend works today. A run builds its sandbox, supervises the task, prints the report, and tears the sandbox down, and interrupting the command still tears the sandbox down.
 
 Mayfly is not a micro-VM and there is no hypervisor backend. Isolation rests on Linux namespaces and the prepared root, with a dedicated tmpfs at /tmp beside /work, and a run may carry caller-granted read-only host binds and a wall clock timeout and processor and address space ceilings its caller sets, and slice 1 has no GPU support. A janitor watches for a supervisor that dies without removing its sandbox and removes the directory, and where the janitor dies too the next run under the same root sweeps the directory away before it prepares its own. A removal that does not land leaves the directory standing for the janitor, and the report says so with sandbox_removed set to false. A command killed before its provenance is written can leave an empty sandbox directory standing under the root, and the contract names that residue rather than hiding it. A fresh proc mount inside a user namespace is refused on some machines, and on those machines the prepared root carries an empty proc directory and the report says so. Every capture in this README was taken on such a machine, which is why every report above shows proc_mounted as false.
 
-The contract lives in CONTRACT.md, where the setup obligations S1 to S5 stand beside the full contract that landed with slice 1 and its amendments, obligations MF-1 to MF-14, each stated so it can fail.
+The contract lives in CONTRACT.md, where the setup obligations S1 to S5 stand beside the full contract that landed with slice 1 and its amendments, obligations MF-1 to MF-15, each stated so it can fail.
 
 Closed perfection rounds are 100 of 100. A round counts only when a full cycle of work and audit and review and red team and approval has closed, and seeding and setup are not rounds.
 

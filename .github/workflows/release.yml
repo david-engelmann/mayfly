@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: "1.91.1"
+          components: rustfmt, clippy
+      - name: Verify manifest version parity and tag match
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, tomllib
+          cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+          ver = cargo["package"]["version"]
+          if os.environ.get("REF_TYPE") == "tag":
+              expected = f"v{ver}"
+              actual = os.environ.get("REF_NAME", "")
+              assert actual == expected, f"tag {actual} does not match Cargo.toml {expected}"
+          PY
+      - name: Run the local gate
+        run: cargo test
+      - name: Run the codepoint scan
+        run: cargo run --bin codepoint_scan
+      - name: Check the formatting
+        run: cargo fmt --check
+      - name: Run the linter
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Verify crate packaging
+        run: cargo package --locked
+
+  binaries:
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: "1.91.1"
+          targets: ${{ matrix.target }}
+      - name: Build Linux release binary and package archive
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        shell: bash
+        run: |
+          cargo build --release --locked --bin mayfly --target "$TARGET_TRIPLE"
+          python - <<'PY'
+          import hashlib, os, pathlib, tarfile, tomllib
+          ver = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+          target = os.environ["TARGET_TRIPLE"]
+          bin_path = pathlib.Path("target") / target / "release" / "mayfly"
+          out_dir = pathlib.Path("release-staging")
+          out_dir.mkdir(parents=True, exist_ok=True)
+          archive_path = out_dir / f"mayfly-v{ver}-{target}.tar.gz"
+          with tarfile.open(archive_path, "w:gz") as tf:
+              tf.add(bin_path, arcname="mayfly")
+              tf.add("LICENSE", arcname="LICENSE")
+              tf.add("README.md", arcname="README.md")
+          digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+          (out_dir / f"{archive_path.name}.sha256").write_text(f"{digest}  {archive_path.name}\n", encoding="utf-8")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: release-staging/*
+
+  publish-crates:
+    needs: [verify, binaries]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: "1.91.1"
+      - name: Publish mayfly crate to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+  github-release:
+    needs: [verify, binaries]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true

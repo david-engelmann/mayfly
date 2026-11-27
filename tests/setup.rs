@@ -946,3 +946,160 @@ fn codepoint_scan_refuses_a_root_that_does_not_stand() {
         result.stderr
     );
 }
+
+fn job_sections(workflow_text: &str) -> Vec<(String, String)> {
+    let mut jobs: Vec<(String, String)> = Vec::new();
+    let mut in_jobs = false;
+    let mut current_name: Option<String> = None;
+    let mut current_body = String::new();
+    for line in workflow_text.lines() {
+        if line == "jobs:" {
+            in_jobs = true;
+            continue;
+        }
+        if !in_jobs {
+            continue;
+        }
+        let is_job_header = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && line.trim_end().ends_with(':')
+            && !line.trim().contains(' ');
+        if is_job_header {
+            if let Some(prev) = current_name.take() {
+                jobs.push((prev, std::mem::take(&mut current_body)));
+            }
+            current_name = Some(line.trim().trim_end_matches(':').to_string());
+        } else if current_name.is_some() {
+            current_body.push_str(line);
+            current_body.push('\n');
+        }
+    }
+    if let Some(prev) = current_name {
+        jobs.push((prev, current_body));
+    }
+    jobs
+}
+
+#[test]
+fn mf15_release_packaging_metadata_and_version_parity() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), "0.2.0");
+    let cargo_toml = read("Cargo.toml");
+    for required in [
+        "version = \"0.2.0\"",
+        "rust-version = \"1.91\"",
+        "default-run = \"mayfly\"",
+        "readme = \"README.md\"",
+        "repository = \"https://github.com/david-engelmann/mayfly\"",
+        "homepage = \"https://github.com/david-engelmann/mayfly\"",
+        "documentation = \"https://docs.rs/mayfly\"",
+        "keywords = [",
+        "categories = [",
+        "exclude = [\".github/**\"]",
+    ] {
+        assert!(cargo_toml.contains(required), "missing {required}");
+    }
+
+    let ver_out = Command::new(env!("CARGO_BIN_EXE_mayfly"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(ver_out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&ver_out.stdout), "mayfly 0.2.0\n");
+
+    let changelog = read("CHANGELOG.md");
+    assert!(changelog.contains("## 0.2.0"));
+    assert!(changelog.contains("## 0.1.0"));
+    let security = read("SECURITY.md");
+    assert!(security.contains("0.2.x"));
+    assert!(security.contains("GitHub Security Advisories"));
+}
+
+fn checkout_steps_all_disable_credentials(workflow_text: &str) -> usize {
+    let mut count = 0usize;
+    for (_, body) in job_sections(workflow_text) {
+        let mut in_checkout = false;
+        let mut saw_false = false;
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("- ") {
+                if in_checkout {
+                    assert!(
+                        saw_false,
+                        "checkout step missing persist-credentials: false in:\n{body}"
+                    );
+                }
+                in_checkout = trimmed.contains("actions/checkout@");
+                saw_false = false;
+                if in_checkout {
+                    count += 1;
+                }
+            } else if in_checkout && trimmed == "persist-credentials: false" {
+                saw_false = true;
+            }
+        }
+        if in_checkout {
+            assert!(
+                saw_false,
+                "checkout step missing persist-credentials: false in:\n{body}"
+            );
+        }
+    }
+    count
+}
+
+#[test]
+fn mf15_release_workflow_carries_the_fleet_credential_hygiene() {
+    let rel_text = read(".github/workflows/release.yml");
+    assert!(rel_text.contains("permissions:\n  contents: read"));
+    assert!(rel_text.contains("- \"v*\""));
+    assert!(rel_text.contains("workflow_dispatch:"));
+    assert!(!rel_text.contains("write-all"));
+    assert!(!rel_text.contains("id-token: write"));
+    assert!(!rel_text.contains("rust-toolchain@master"));
+    assert!(!rel_text.contains("python3 -"));
+    let checkouts = checkout_steps_all_disable_credentials(&rel_text);
+    assert_eq!(checkouts, 3);
+    assert!(toolchain_pins_all_full(&rel_text));
+
+    let write_lines: Vec<&str> = rel_text
+        .lines()
+        .filter(|line| line.contains(": write"))
+        .collect();
+    assert_eq!(write_lines, vec!["      contents: write"]);
+
+    let jobs = job_sections(&rel_text);
+    let names: Vec<&str> = jobs.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["verify", "binaries", "publish-crates", "github-release"]
+    );
+    for (name, body) in &jobs {
+        match name.as_str() {
+            "verify" => {
+                assert!(body.contains("REF_TYPE:"));
+                assert!(body.contains("REF_NAME:"));
+                assert!(body.contains("expected = f\"v{ver}\""));
+            }
+            "binaries" => {
+                assert!(body.contains("    needs: verify\n"));
+                assert!(body.contains("x86_64-unknown-linux-gnu"));
+                assert!(body.contains("aarch64-unknown-linux-gnu"));
+                assert!(!body.contains("apple-darwin"));
+                assert!(!body.contains("windows"));
+            }
+            "publish-crates" | "github-release" => {
+                let (header, _) = body.split_once("\n    steps:\n").expect("steps header");
+                assert!(header.lines().any(|l| l == "    needs: [verify, binaries]"));
+                assert!(header
+                    .lines()
+                    .any(|l| l == "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"));
+                if name == "github-release" {
+                    assert!(header.lines().any(|l| l == "      contents: write"));
+                } else {
+                    assert!(!body.contains("contents: write"));
+                }
+            }
+            other => panic!("unexpected job {other}"),
+        }
+    }
+}
