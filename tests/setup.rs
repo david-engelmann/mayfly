@@ -233,6 +233,15 @@ fn ci_runs_on_push_and_on_pull_request() {
 }
 
 #[test]
+fn portability_runs_on_push_and_on_pull_request() {
+    let text = read(".github/workflows/portability.yml");
+    assert!(trigger_block_carries_both(&text));
+    let narrowed = text.replace("  pull_request:\n", "");
+    assert_ne!(narrowed, text);
+    assert!(!trigger_block_carries_both(&narrowed));
+}
+
+#[test]
 fn ci_carries_the_fleet_credential_hygiene() {
     let text = read(".github/workflows/ci.yml");
     // The workflow asks for no more than it uses. Its token
