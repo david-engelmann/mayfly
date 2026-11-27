@@ -2,6 +2,8 @@
 
 Mayfly is a disposable Linux namespace sandbox harness for autonomous agent tasks. Given a managed root directory and a command, Mayfly prepares a fresh sandbox directory, enters isolated Linux namespaces, pivots onto a read-only system view paired with dedicated private writable `/work` and `/tmp` `tmpfs` mounts, supervises the task under PID 1 init, prints one structured JSON `RunReport`, and incinerates the sandbox directory on exit.
 
+![mayfly architecture](assets/architecture.svg)
+
 ## 1. Isolation architecture and filesystem layout
 
 On Linux (`x86_64` and `aarch64`), `NamespaceBackend` spawns each run inside fresh user, mount, PID, UTS (`hostname` set to `mayfly`), IPC, and (unless `--net` is passed, which shares the host network namespace) loopback-only network namespaces with an empty capability set. Inside the sandbox before `pivot_root`, the init assembles a deterministic layout.
