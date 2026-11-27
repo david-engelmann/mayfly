@@ -4,7 +4,7 @@
 //! U+2013 in every file under the scan root and exits 1 when either
 //! count is nonzero. What it counts, the counts it prints, the
 //! directory names it excludes below the scan root, and the binary
-//! suffixes it skips match the setup scanner, and four differences
+//! suffixes it skips match the setup scanner, and five differences
 //! from that scanner stand named here as deliberate behaviour of
 //! the port. The excluded directory names add target, the cargo
 //! output directory, because in a Rust repo that is the generated
@@ -14,9 +14,11 @@
 //! defaulted to the root of the repo it shipped in, and the gate
 //! names the root explicitly either way. The scanner takes at most
 //! one argument, the scan root, and an argument standing after the
-//! scan root is refused at exit 2 before any scanning. A scan root
-//! that does not stand is a scan error at exit 2, where the setup
-//! scanner exited 0 with zero counts. A file that cannot be read is a clean scan
+//! scan root is refused at exit 2 before any scanning, where the
+//! setup scanner reads its first argument and lets the rest stand.
+//! A scan root that does not stand is a scan error at exit 2, where
+//! the setup scanner exited 0 with zero counts. A file that cannot
+//! be read is a clean scan
 //! error at exit 2, where the setup scanner let the failure escape
 //! as a traceback at exit 1. The walk excludes directories by name
 //! below the scan root, so the name of an ancestor of the root can
