@@ -209,6 +209,13 @@ fn ci_carries_the_fleet_credential_hygiene() {
     assert!(text.contains("permissions:"));
     assert!(text.contains("contents: read"));
     assert!(text.contains("persist-credentials: false"));
+    assert!(!text.contains("write-all"));
+    for line in text.lines() {
+        assert!(
+            !line.trim_end().ends_with(": write"),
+            "no workflow line may carry a write grant: {line}"
+        );
+    }
     assert!(!text.contains("rust-toolchain@master"));
     assert!(
         toolchain_pins_all_full(&text),
