@@ -1,0 +1,29 @@
+name: Feature or contract proposal
+description: Propose a standalone sandbox capability, backend feature, or contract amendment for mayfly
+title: "[proposal] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For suspected security vulnerabilities, do not open a public proposal and instead follow the private reporting instructions in `SECURITY.md`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operational problem or use case
+      description: Describe the concrete host or agent workflow this change enables while keeping `mayfly` standalone
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed CLI or Rust library surface
+      description: Sketch the proposed behavior, failure modes, and how an obligation in `CONTRACT.md` can falsify it
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or wrapper approaches considered
+    validations:
+      required: false

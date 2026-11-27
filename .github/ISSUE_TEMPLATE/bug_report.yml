@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a reproducible defect or contract discrepancy in mayfly
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue in `mayfly`. For security vulnerabilities, do not file a public issue and instead use private reporting as described in `SECURITY.md`.
+  - type: input
+    id: version
+    attributes:
+      label: "Mayfly version or commit SHA"
+      description: Output of `mayfly --version` or the exact git commit SHA
+      placeholder: "mayfly 0.2.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system, kernel, architecture, and Rust version
+      placeholder: "Linux x86_64 (Ubuntu 24.04), Rust 1.91.1"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction steps
+      description: Provide sanitized commands or a self-contained snippet using synthetic test values only
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior (and relevant CONTRACT.md obligation if applicable)
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and full error output
+    validations:
+      required: true

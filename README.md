@@ -1,10 +1,14 @@
 # mayfly
 
+![mayfly overview](docs/assets/hero.svg)
+
 Runs one command in a disposable directory with a scrubbed environment and the network off by default, mirrors the command's exit code, and deletes the directory when the command ends.
 
 Mayfly is a small Rust program that gives one task a disposable sandbox to run in. You hand it a root directory and a command. It builds a fresh namespace sandbox under that root from Linux namespaces and a prepared root filesystem, runs the command inside under its own init, prints a run report as JSON, and tears the whole sandbox down when the command ends.
 
-[![CI](https://github.com/david-engelmann/mayfly/actions/workflows/ci.yml/badge.svg)](https://github.com/david-engelmann/mayfly/actions/workflows/ci.yml)
+[![CI](https://github.com/david-engelmann/mayfly/actions/workflows/ci.yml/badge.svg)](https://github.com/david-engelmann/mayfly/actions/workflows/ci.yml) [![Portability](https://github.com/david-engelmann/mayfly/actions/workflows/portability.yml/badge.svg)](https://github.com/david-engelmann/mayfly/actions/workflows/portability.yml) [![Release v0.2.0](https://img.shields.io/github/v/release/david-engelmann/mayfly)](https://github.com/david-engelmann/mayfly/releases/tag/v0.2.0) [![Linux x86_64 and aarch64](https://img.shields.io/badge/linux-x86__64%20%7C%20aarch64-8b5cf6.svg)](Cargo.toml) [![License MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+[Install](#install) | [Quickstart](#quickstart) | [Architecture](#architecture) | [Usage](#usage) | [Measurements](#measurements) | [Guides and examples](#guides-and-examples) | [Operator Guide](docs/GUIDE.md) | [Contributing](CONTRIBUTING.md) | [Contract](CONTRACT.md)
 
 ```
 {
@@ -127,6 +131,18 @@ mayfly run --root /tmp/mayfly-runs -- /bin/sh -c "echo the task gives up; exit 3
 ```
 
 The last line is the shell exit code of that run, printed by echo $? in the same session.
+
+## Architecture
+
+![mayfly architecture](docs/assets/architecture.svg)
+
+Before creating any directory under `--root`, Mayfly validates resource bounds and checks every `--ro-bind` source with `symlink_metadata`. On Linux (`x86_64` and `aarch64`), `NamespaceBackend` unshares isolated namespaces, pivots onto a locked read-only system view paired with private writable `/work` and `/tmp` `tmpfs` mounts, drops all task capabilities, and cleans up through three independent layers.
+
+| Phase | Isolation and lifecycle actions | Failure and cleanup behavior |
+| --- | --- | --- |
+| `1. Pre-prepare and spawn` | Checks `--timeout`, `--max-cpu`, `--max-memory`, and `--ro-bind` sources, scrubs caller environment to `PATH` (or `--allow-env`), and unshares `user`, `mnt`, `pid`, `uts`, `ipc`, and loopback `net` namespaces (unless `--net` opts into host networking) | Bad CLI flags exit `2` and bad `--ro-bind` sources exit `125` with zero directory created |
+| `2. PID 1 init and task` | Mounts private writable `tmpfs` on `/work` and `/tmp` (`01777`), locks `/usr`, `/etc`, `/bin..`, and `--ro-bind` trees read-only, runs `pivot_root`, drops all capabilities, and supervises the child | Mirrors task exit `0..255` or `128 + signal`, and reports `125` on timeout or start failure |
+| `3. Three-layer teardown` | Supervisor removes `run-<id>` on exit or signal, detached janitor sweeps if supervisor dies unexpectedly, and next run sweeps stale orphans once `/proc` liveness is confirmed | Records `sandbox_removed` and phase timings in the JSON `RunReport` |
 
 ## Usage
 
@@ -407,7 +423,7 @@ Mayfly is completely standalone and depends on zero sibling packages. In hosts t
 
 ## Guides and examples
 
-Read [docs/GUIDE.md](docs/GUIDE.md) for the operator and sandbox architecture guide covering Linux namespace isolation, prepared root layout with `/work` and private `/tmp`, `--ro-bind` read-only mounts, environment scrubbing and `--allow-env`, resource bounds, exit codes, and three-layer janitor and orphan-sweep cleanup. From a local checkout, run the self-contained Rust and Python quickstarters in [examples/quickstart.rs](examples/quickstart.rs) and [examples/sandbox_walkthrough.py](examples/sandbox_walkthrough.py).
+Read [docs/GUIDE.md](docs/GUIDE.md) for the operator and sandbox architecture guide covering Linux namespace isolation, prepared root layout with `/work` and private `/tmp`, `--ro-bind` read-only mounts, environment scrubbing and `--allow-env`, resource bounds, exit codes, and three-layer janitor and orphan-sweep cleanup, and see [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) for contributor gates and vulnerability reporting. From a local checkout, run the self-contained Rust and Python quickstarters in [examples/quickstart.rs](examples/quickstart.rs) and [examples/sandbox_walkthrough.py](examples/sandbox_walkthrough.py).
 
 ```
 cargo build --bin mayfly
