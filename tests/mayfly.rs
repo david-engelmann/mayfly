@@ -4527,6 +4527,75 @@ fn cli_refuses_the_widest_processor_ceiling_at_2() {
 }
 
 #[test]
+fn a_processor_ceiling_at_its_highest_value_is_accepted_on_both_surfaces() {
+    // The ceiling's refusal side stands pinned at both
+    // judgement seats, at the widest value, and the admitted
+    // edge itself, the highest formable ceiling of
+    // 18446744073709551614 seconds, stands driven on neither
+    // surface: a ceiling comparison written on the wrong side
+    // of the edge, refusing at or over the ceiling, would
+    // refuse a value the contract accepts and no pin would
+    // fail. On the command line the call names the edge value
+    // beside an unknown backend, and the unknown backend
+    // report at 125 proves the value passed the ceiling check
+    // on its way to the backend resolution, where the wrong
+    // comparison answers 2 in the ceiling words with no
+    // report printed. On the library surface the spec carries
+    // the edge value through the recording writer backend of
+    // the floor pins, its unshare missing the way the missing
+    // unshare pin leaves it, and the run reaches the writer
+    // and answers with the launch failure of its missing
+    // unshare, where the wrong comparison refuses at the
+    // bound check in the ceiling sentence with the writer
+    // never reached.
+    ensure_helper();
+    let tmp = Tmp::new("bound-cli-ceiling-value");
+    let mut out: Vec<u8> = Vec::new();
+    let mut err: Vec<u8> = Vec::new();
+    let mut args = vec![
+        os("run"),
+        os("--root"),
+        tmp.path().as_os_str().to_os_string(),
+        os("--max-cpu"),
+        os("18446744073709551614"),
+        os("--backend"),
+        os("nosuch"),
+        os("--"),
+    ];
+    args.extend(cmd(&["/bin/echo", "landed"]));
+    let code = cli_main(&args, &mut out, &mut err);
+    assert_eq!(code, HARNESS_EXIT_CODE);
+    assert!(err.is_empty());
+    let payload: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(payload["backend"], "nosuch");
+    assert_eq!(payload["outcome"], "harness_error");
+    assert_eq!(payload["error"], "unknown backend, nosuch");
+    assert_eq!(dir_names(tmp.path()), Vec::<String>::new());
+    let tmp = Tmp::new("bound-ceiling-value");
+    let preparations: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let record = preparations.clone();
+    let mut backend =
+        NamespaceBackend::with_unshare_path(Some(PathBuf::from("/nonexistent/unshare")));
+    backend.provenance_writer = Some(Arc::new(move |dir: &Path, _run_id: &str| {
+        record.lock().unwrap().push(dir.to_path_buf());
+        Ok(())
+    }));
+    let mut ceiling_spec = spec(py_cmd("pass"), tmp.path());
+    ceiling_spec.max_cpu_seconds = Some(u64::MAX - 1);
+    let report = backend.run(&ceiling_spec);
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(
+        report.error.as_deref(),
+        Some(
+            "could not launch unshare, [Errno 2] No such file or directory: '/nonexistent/unshare'"
+        )
+    );
+    assert_eq!(preparations.lock().unwrap().len(), 1);
+    assert_eq!(report.sandbox_removed, Some(true));
+    assert!(dir_names(tmp.path()).is_empty());
+}
+
+#[test]
 fn cli_refuses_a_bound_value_under_its_floor_at_2() {
     // The library floor refusals are pinned word for word
     // through the backend, and the command line's missing
