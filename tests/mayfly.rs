@@ -1971,6 +1971,19 @@ fn the_janitor_marker_read_is_bounded_and_bad_bytes_read_as_no_token() {
 }
 
 #[test]
+fn an_empty_token_authenticates_nothing() {
+    let tmp = Tmp::new("janitor-empty-token");
+    let sandbox = tmp.path().join("sandbox");
+    std::fs::create_dir_all(&sandbox).unwrap();
+    std::fs::write(sandbox.join("leftover.txt"), "left behind").unwrap();
+    let marker = tmp.path().join("clean-marker");
+    std::fs::write(&marker, b"\n").unwrap();
+    assert_eq!(drive_janitor(&sandbox, &marker, ""), 0);
+    assert!(!sandbox.exists());
+    assert!(!marker.exists());
+}
+
+#[test]
 fn a_planted_marker_with_bytes_that_are_not_text_does_not_stand_the_janitor_down() {
     if !require_sandbox() {
         return;
