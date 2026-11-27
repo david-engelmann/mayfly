@@ -572,6 +572,43 @@ fn codepoint_scan_counts_a_dash_in_an_uppercase_suffix_file() {
 }
 
 #[test]
+#[cfg(unix)]
+fn codepoint_scan_counts_a_dash_in_a_file_with_a_non_utf8_name() {
+    // MF-P42. The scanner's module doc states that every
+    // regular file in the tree is scanned, whatever its
+    // name, and collect takes each file by its type alone
+    // and never converts its name, so a file whose name
+    // carries a byte no UTF-8 string holds is counted
+    // exactly as a text named file is. A collect that took
+    // a file's name through a string conversion and passed
+    // over the names that fail it, or a scan that passed
+    // over a path it could not render as text, answers
+    // zero counts at exit 0 over this tree. The pin
+    // asserts the totals alone, so the judgement rests on
+    // the file's counting and not on the lossy rendering
+    // of its name in a per file line.
+    use std::os::unix::ffi::OsStrExt;
+    let dir = temp_dir("non-utf8-name");
+    // The staging stands down where the filesystem itself
+    // refuses a name carrying a byte no UTF-8 string holds,
+    // as macOS answers at creation, since no scanner claim
+    // can be staged over a file the platform will not create.
+    if std::fs::write(
+        dir.join(std::ffi::OsStr::from_bytes(b"bad\xffname.md")),
+        "a\u{2014}b",
+    )
+    .is_err()
+    {
+        return;
+    }
+    std::fs::write(dir.join("clean.md"), "plain text").unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 1"));
+    assert!(result.stdout.contains("en dash U+2013 count 0"));
+}
+
+#[test]
 fn codepoint_scan_skips_a_file_with_an_uppercase_binary_suffix() {
     let dir = temp_dir("upper-binary");
     std::fs::write(dir.join("FAKE.PNG"), "a\u{2014}b").unwrap();
