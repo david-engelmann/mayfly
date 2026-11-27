@@ -147,22 +147,23 @@ fn trigger_block_carries_both(text: &str) -> bool {
     push && pull_request
 }
 
-fn run_commands(ci_text: &str) -> Vec<String> {
+fn run_commands(text: &str, job_name: &str) -> Vec<String> {
+    let job_head = format!("{job_name}:");
     let mut commands = Vec::new();
     let mut step_lines: Vec<String> = Vec::new();
     let mut in_steps = false;
-    let mut in_test_job = false;
+    let mut in_job = false;
     let mut job_disabled = false;
-    for line in ci_text.lines() {
+    for line in text.lines() {
         let stripped = line.trim();
         if stripped.starts_with('#') {
             continue;
         }
-        if stripped == "test:" {
-            in_test_job = true;
+        if stripped == job_head {
+            in_job = true;
             continue;
         }
-        if in_test_job && !in_steps && stripped.starts_with("if:") {
+        if in_job && !in_steps && stripped.starts_with("if:") {
             let value = stripped
                 .split_once(':')
                 .map(|(_, rest)| rest)
@@ -197,7 +198,7 @@ fn run_commands(ci_text: &str) -> Vec<String> {
 
 #[test]
 fn ci_runs_the_local_gate_commands() {
-    let commands = run_commands(&read(".github/workflows/ci.yml"));
+    let commands = run_commands(&read(".github/workflows/ci.yml"), "test");
     assert!(commands.iter().any(|c| c == GATE_COMMAND));
     assert!(commands.iter().any(|c| c == SCAN_COMMAND));
     assert!(commands.iter().any(|c| c == FMT_COMMAND));
@@ -239,6 +240,30 @@ fn portability_runs_on_push_and_on_pull_request() {
     let narrowed = text.replace("  pull_request:\n", "");
     assert_ne!(narrowed, text);
     assert!(!trigger_block_carries_both(&narrowed));
+}
+
+#[test]
+fn portability_runs_the_local_gate_commands_on_macos() {
+    let text = read(".github/workflows/portability.yml");
+    let job_head = "  macos:\n    runs-on: macos-latest";
+    assert!(text.contains(job_head));
+    let commands = run_commands(&text, "macos");
+    assert!(commands.iter().any(|c| c == GATE_COMMAND));
+    assert!(commands.iter().any(|c| c == SCAN_COMMAND));
+    assert!(commands.iter().any(|c| c == FMT_COMMAND));
+    assert!(commands.iter().any(|c| c == CLIPPY_COMMAND));
+    for flag in ["false", "\"false\""] {
+        let disabled = text.replace(
+            job_head,
+            &format!("  macos:\n    if: {flag}\n    runs-on: macos-latest"),
+        );
+        assert_ne!(disabled, text);
+        let commands = run_commands(&disabled, "macos");
+        assert!(!commands.iter().any(|c| c == GATE_COMMAND));
+        assert!(!commands.iter().any(|c| c == SCAN_COMMAND));
+        assert!(!commands.iter().any(|c| c == FMT_COMMAND));
+        assert!(!commands.iter().any(|c| c == CLIPPY_COMMAND));
+    }
 }
 
 #[test]
@@ -297,7 +322,7 @@ fn ci_gate_parser_skips_a_step_disabled_with_if_false() {
                 "      - name: Run the local gate\n        if: {flag}\n        run: cargo test"
             ),
         );
-        let commands = run_commands(&disabled);
+        let commands = run_commands(&disabled, "test");
         assert!(!commands.iter().any(|c| c == GATE_COMMAND));
         assert!(commands.iter().any(|c| c == SCAN_COMMAND));
     }
@@ -313,13 +338,13 @@ fn ci_gate_parser_rejects_a_job_disabled_with_if_false() {
             job_head,
             &format!("  test:\n    if: {flag}\n    runs-on: ubuntu-latest"),
         );
-        let commands = run_commands(&disabled);
+        let commands = run_commands(&disabled, "test");
         assert!(!commands.iter().any(|c| c == GATE_COMMAND));
         assert!(!commands.iter().any(|c| c == SCAN_COMMAND));
         assert!(!commands.iter().any(|c| c == FMT_COMMAND));
         assert!(!commands.iter().any(|c| c == CLIPPY_COMMAND));
     }
-    let commands = run_commands(&ci_text);
+    let commands = run_commands(&ci_text, "test");
     assert!(commands.iter().any(|c| c == GATE_COMMAND));
     assert!(commands.iter().any(|c| c == SCAN_COMMAND));
     assert!(commands.iter().any(|c| c == FMT_COMMAND));
