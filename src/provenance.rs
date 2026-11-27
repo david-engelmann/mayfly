@@ -387,6 +387,17 @@ fn entry_mtime_secs(entry: &Path) -> Option<f64> {
     }
 }
 
+/// Whether a real directory stands at a path, judged by the
+/// entry standing there itself and never through a link, the
+/// one judgement both of sweep_one's arms take over the
+/// positions they weigh. False where the entry's metadata
+/// cannot be read.
+fn real_dir_stands(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_dir())
+        .unwrap_or(false)
+}
+
 fn sweep_one(
     root: &Path,
     proc_dir: &Path,
@@ -401,9 +412,7 @@ fn sweep_one(
     // Only a real directory standing at the position counts. A
     // symlink there is skipped whole, its target never read and
     // the link itself never removed, whatever stands behind it.
-    let is_real_dir = std::fs::symlink_metadata(entry)
-        .map(|meta| meta.file_type().is_dir())
-        .unwrap_or(false);
+    let is_real_dir = real_dir_stands(entry);
     if is_real_dir && name.starts_with(RUN_DIR_PREFIX) {
         let mtime = match entry_mtime_secs(entry) {
             Some(t) => t,
@@ -427,9 +436,7 @@ fn sweep_one(
         let _ = std::fs::remove_file(marker);
     } else if entry.is_file() && name.starts_with(CLEAN_MARKER_PREFIX) {
         let run_dir = root.join(run_dir_name(&name[CLEAN_MARKER_PREFIX.len()..]));
-        let run_dir_stands = std::fs::symlink_metadata(&run_dir)
-            .map(|meta| meta.file_type().is_dir())
-            .unwrap_or(false);
+        let run_dir_stands = real_dir_stands(&run_dir);
         if run_dir_stands {
             return;
         }
