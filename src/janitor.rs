@@ -16,7 +16,8 @@
 //! nothing down. When the runner dies without removing the
 //! sandbox, the pipe closes with no genuine marker left, and the
 //! janitor removes the sandbox directory itself, so a killed
-//! supervisor leaves no sandbox directory behind. The removal
+//! supervisor whose janitor lives to finish this work leaves
+//! no sandbox directory behind. The removal
 //! can land while the run's init is still dying, and the init
 //! then recreates the sandbox shape behind the removal, so the
 //! janitor watches the removed path for a few seconds afterwards
