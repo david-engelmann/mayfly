@@ -1022,92 +1022,104 @@ pub(crate) fn validate_ro_bind_destinations(
     binds: &[(PathBuf, PathBuf)],
 ) -> Result<Vec<PathBuf>, String> {
     let mut normalized: Vec<PathBuf> = Vec::with_capacity(binds.len());
-    for (src, dst) in binds {
-        if src.as_os_str().is_empty() {
-            return Err("the read-only bind source path is empty".to_string());
-        }
-        if src.as_os_str().as_bytes().contains(&0) {
-            return Err("the read-only bind source path contains a NUL byte".to_string());
-        }
-        let raw = dst.as_os_str().as_bytes();
-        if raw.is_empty() || raw[0] != b'/' {
-            return Err(format!(
-                "the read-only bind destination {} must start with /",
-                dst.display()
-            ));
-        }
-        if raw.contains(&0) {
-            return Err(format!(
-                "the read-only bind destination {} contains a NUL byte",
-                dst.display()
-            ));
-        }
-        let mut segments: Vec<&[u8]> = Vec::new();
-        for part in raw[1..].split(|&byte| byte == b'/') {
-            if part.is_empty() {
-                continue;
-            }
-            if part == b"." || part == b".." {
-                return Err(format!(
-                    "the read-only bind destination {} cannot contain dot or parent segments",
-                    dst.display()
-                ));
-            }
-            segments.push(part);
-        }
-        if segments.is_empty() {
-            return Err("the read-only bind destination / is reserved".to_string());
-        }
-        if matches!(
-            segments[0],
-            b".oldroot"
-                | b"proc"
-                | b"dev"
-                | b"sys"
-                | b"usr"
-                | b"etc"
-                | b"bin"
-                | b"sbin"
-                | b"lib"
-                | b"lib64"
-                | b"tmp"
-        ) {
-            return Err(format!(
-                "the read-only bind destination {} lies inside a reserved sandbox path",
-                dst.display()
-            ));
-        }
-        if segments[0] == b"work" && segments.len() == 1 {
-            return Err("the read-only bind destination /work is reserved".to_string());
-        }
-        let mut norm_os = OsString::new();
-        for seg in &segments {
-            norm_os.push("/");
-            norm_os.push(std::ffi::OsStr::from_bytes(seg));
-        }
-        let norm_dst = PathBuf::from(norm_os);
-        for existing in &normalized {
-            let a = existing.as_os_str().as_bytes();
-            let b = norm_dst.as_os_str().as_bytes();
-            if a == b {
-                return Err(format!(
-                    "the read-only bind destination {} is named more than once",
-                    norm_dst.display()
-                ));
-            }
-            let b_under_a = b.len() > a.len() && b.starts_with(a) && b[a.len()] == b'/';
-            let a_under_b = a.len() > b.len() && a.starts_with(b) && a[b.len()] == b'/';
-            if b_under_a || a_under_b {
-                return Err(format!(
-                    "the read-only bind destinations {} and {} overlap",
-                    existing.display(),
-                    norm_dst.display()
-                ));
-            }
-        }
+    for bind in binds {
+        let norm_dst = validate_ro_bind_destination(bind, &normalized)?;
         normalized.push(norm_dst);
     }
     Ok(normalized)
+}
+
+/// Validate one read-only bind pair against the normalized
+/// destinations standing so far and answer the pair's normalized
+/// destination.
+pub(crate) fn validate_ro_bind_destination(
+    bind: &(PathBuf, PathBuf),
+    normalized: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let (src, dst) = bind;
+    if src.as_os_str().is_empty() {
+        return Err("the read-only bind source path is empty".to_string());
+    }
+    if src.as_os_str().as_bytes().contains(&0) {
+        return Err("the read-only bind source path contains a NUL byte".to_string());
+    }
+    let raw = dst.as_os_str().as_bytes();
+    if raw.is_empty() || raw[0] != b'/' {
+        return Err(format!(
+            "the read-only bind destination {} must start with /",
+            dst.display()
+        ));
+    }
+    if raw.contains(&0) {
+        return Err(format!(
+            "the read-only bind destination {} contains a NUL byte",
+            dst.display()
+        ));
+    }
+    let mut segments: Vec<&[u8]> = Vec::new();
+    for part in raw[1..].split(|&byte| byte == b'/') {
+        if part.is_empty() {
+            continue;
+        }
+        if part == b"." || part == b".." {
+            return Err(format!(
+                "the read-only bind destination {} cannot contain dot or parent segments",
+                dst.display()
+            ));
+        }
+        segments.push(part);
+    }
+    if segments.is_empty() {
+        return Err("the read-only bind destination / is reserved".to_string());
+    }
+    if matches!(
+        segments[0],
+        b".oldroot"
+            | b"proc"
+            | b"dev"
+            | b"sys"
+            | b"usr"
+            | b"etc"
+            | b"bin"
+            | b"sbin"
+            | b"lib"
+            | b"lib64"
+            | b"tmp"
+    ) {
+        return Err(format!(
+            "the read-only bind destination {} lies inside a reserved sandbox path",
+            dst.display()
+        ));
+    }
+    if segments[0] == b"work" && segments.len() == 1 {
+        return Err("the read-only bind destination /work is reserved".to_string());
+    }
+    let mut norm_os = OsString::new();
+    for seg in &segments {
+        norm_os.push("/");
+        norm_os.push(std::ffi::OsStr::from_bytes(seg));
+    }
+    let norm_dst = PathBuf::from(norm_os);
+    for existing in normalized {
+        let a = existing.as_os_str().as_bytes();
+        let b = norm_dst.as_os_str().as_bytes();
+        if a == b {
+            return Err(format!(
+                "the read-only bind destination {} is named more than once",
+                norm_dst.display()
+            ));
+        }
+        let b_under_a = b.len() > a.len() && b.starts_with(a) && b[a.len()] == b'/';
+        let a_under_b = a.len() > b.len() && a.starts_with(b) && a[b.len()] == b'/';
+        if b_under_a || a_under_b {
+            return Err(format!(
+                "the read-only bind destinations {} and {} overlap",
+                existing.display(),
+                norm_dst.display()
+            ));
+        }
+    }
+    Ok(norm_dst)
 }
 
 /// Inspect one host source path for MF-14 without following a final
