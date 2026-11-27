@@ -589,11 +589,18 @@ fn codepoint_scan_counts_a_dash_in_a_file_with_a_non_utf8_name() {
     // of its name in a per file line.
     use std::os::unix::ffi::OsStrExt;
     let dir = temp_dir("non-utf8-name");
-    std::fs::write(
+    // The staging stands down where the filesystem itself
+    // refuses a name carrying a byte no UTF-8 string holds,
+    // as macOS answers at creation, since no scanner claim
+    // can be staged over a file the platform will not create.
+    if std::fs::write(
         dir.join(std::ffi::OsStr::from_bytes(b"bad\xffname.md")),
         "a\u{2014}b",
     )
-    .unwrap();
+    .is_err()
+    {
+        return;
+    }
     std::fs::write(dir.join("clean.md"), "plain text").unwrap();
     let result = scan_tree(&dir);
     assert_eq!(result.status, 1);
