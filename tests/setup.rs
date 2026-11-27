@@ -289,16 +289,19 @@ struct ScanOutput {
     stderr: String,
 }
 
-fn scan_tree(root: &Path) -> ScanOutput {
-    let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
-        .arg(root)
-        .output()
-        .unwrap();
+fn scan_output(mut command: Command) -> ScanOutput {
+    let output = command.output().unwrap();
     ScanOutput {
         status: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
+}
+
+fn scan_tree(root: &Path) -> ScanOutput {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"));
+    command.arg(root);
+    scan_output(command)
 }
 
 fn scan_tree_with_extra(root: &Path, extra: &str) -> ScanOutput {
@@ -315,15 +318,9 @@ fn scan_tree_with_extra(root: &Path, extra: &str) -> ScanOutput {
 }
 
 fn scan_from(dir: &Path) -> ScanOutput {
-    let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    ScanOutput {
-        status: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"));
+    command.current_dir(dir);
+    scan_output(command)
 }
 
 #[test]
