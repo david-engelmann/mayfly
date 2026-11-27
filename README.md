@@ -38,7 +38,13 @@ Mayfly is a small Rust program that gives one task a disposable sandbox to run i
 
 ## Install
 
-Mayfly builds from source with Cargo. Clone the repo and install the binary onto your path.
+Install from Crates.io or build from source with Cargo.
+
+```
+cargo install mayfly --bin mayfly
+```
+
+From a local checkout, install the binary onto your path.
 
 ```
 git clone https://github.com/david-engelmann/mayfly.git
@@ -386,6 +392,18 @@ A busy task under a processor ceiling of 1 second died by the processor limit si
 ```
 mayfly run --root /tmp/mayfly-runs --max-cpu 1 -- /usr/bin/python3 -c "exec('while True:' + chr(10) + '    pass')"
 ```
+
+### Read-only host binds and /tmp
+
+Every sandbox mounts a private `tmpfs` with mode `01777` at `/tmp` alongside `/work`, so scratch files under `/tmp` stay isolated to that run and vanish when the sandbox exits. When a task needs read-only access to host files or directories, pass repeatable `--ro-bind` flags naming the host source and an absolute sandbox destination outside the reserved system trees. Each source is checked with `symlink_metadata` before any sandbox directory is prepared and locked read-only before `pivot_root`.
+
+```
+mayfly run --root /tmp/mayfly-runs --ro-bind ./corpus:/inputs --ro-bind ./policy.json:/work/ro/policy.json -- /bin/cat /inputs/item.txt
+```
+
+### Optional composition
+
+Mayfly is completely standalone and depends on zero sibling packages. In hosts that combine multiple tools, `portcullis` evaluates whether a proposed command may run, `deadbolt` redeems any approved scoped credential and passes only the target variable into `mayfly run --allow-env`, and `arvin` tracks progress proofs and spend ceilings across runs.
 
 ## Status
 
