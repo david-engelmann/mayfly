@@ -522,6 +522,30 @@ fn codepoint_scan_skips_excluded_dirs_below_the_root() {
 }
 
 #[test]
+fn codepoint_scan_counts_a_dash_inside_a_case_variant_of_an_excluded_dir() {
+    // MF-P70. The directory name test reads the name exactly
+    // as it stands, where the binary suffix test standing in
+    // the same walk folds its case before testing, and the
+    // suffix behaviour stands pinned at both of its case
+    // forms while the directory behaviour stood pinned at
+    // neither. A walk that folded the directory name's case
+    // as it folds the suffix's would pass over a dash
+    // standing inside a case variant of an excluded name and
+    // answer the tree clean. This pin stages the variant
+    // Target carrying one em dash beside a clean file, so it
+    // fails on the case folding form and passes on the
+    // standing scanner.
+    let dir = temp_dir("excluded-dir-case");
+    let variant = dir.join("Target");
+    std::fs::create_dir_all(&variant).unwrap();
+    std::fs::write(variant.join("note.md"), "a\u{2014}b").unwrap();
+    std::fs::write(dir.join("clean.md"), "clean").unwrap();
+    let result = scan_tree(&dir);
+    assert_eq!(result.status, 1);
+    assert!(result.stdout.contains("em dash U+2014 count 1"));
+}
+
+#[test]
 fn codepoint_scan_skips_every_excluded_dir_below_the_root() {
     let dir = temp_dir("excluded-dirs-all");
     std::fs::write(dir.join("clean.md"), "clean").unwrap();
