@@ -152,6 +152,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
     let mut backend = "namespace".to_string();
     let mut allow_env: Vec<OsString> = Vec::new();
     let mut ro_binds: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut normalized_destinations: Vec<PathBuf> = Vec::new();
     let mut network = false;
     let mut timeout_seconds: Option<u64> = None;
     let mut max_cpu_seconds: Option<u64> = None;
@@ -216,13 +217,22 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
                     let _ = writeln!(err, "mayfly run needs --ro-bind in HOST:SANDBOX form");
                     return 2;
                 }
-                ro_binds.push((
+                let pair = (
                     PathBuf::from(OsStr::from_bytes(host_bytes)),
                     PathBuf::from(OsStr::from_bytes(sandbox_bytes)),
-                ));
-                if let Err(detail) = crate::namespace::validate_ro_bind_destinations(&ro_binds) {
-                    let _ = writeln!(err, "mayfly run refused --ro-bind, {}", detail);
-                    return 2;
+                );
+                match crate::namespace::validate_ro_bind_destination(
+                    &pair,
+                    &normalized_destinations,
+                ) {
+                    Ok(norm_dst) => {
+                        normalized_destinations.push(norm_dst);
+                        ro_binds.push(pair);
+                    }
+                    Err(detail) => {
+                        let _ = writeln!(err, "mayfly run refused --ro-bind, {}", detail);
+                        return 2;
+                    }
                 }
                 index += 2;
             }
