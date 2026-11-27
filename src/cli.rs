@@ -29,8 +29,9 @@ const USAGE: &str = "usage: mayfly run --root DIR [--backend NAME] [--allow-env 
 /// value, a value that does not read as a whole count, and a
 /// value under the bound floor each refuse at exit 2 in their
 /// own words, and no report is printed for any of them, as no
-/// report is printed for any malformed call. The floor text
-/// is the words the floor refusal carries for this bound. A
+/// report is printed for any malformed call. The floor unit
+/// is the unit word of this bound, and the floor refusal
+/// forms its words from the floor count and that unit. A
 /// bound that carries a ceiling refuses a value over it in
 /// the same class, in the words of its bound, and a bound
 /// with no ceiling passes none. A value written in digits
@@ -44,7 +45,7 @@ fn bound_value(
     value: Option<OsString>,
     name: &str,
     floor: u64,
-    floor_text: &str,
+    floor_unit: &str,
     ceiling: Option<u64>,
     err: &mut dyn Write,
 ) -> Result<u64, i32> {
@@ -82,7 +83,11 @@ fn bound_value(
         }
     };
     if parsed < floor {
-        let _ = writeln!(err, "mayfly run needs {} of at least {}", name, floor_text);
+        let _ = writeln!(
+            err,
+            "mayfly run needs {} of at least {} {}",
+            name, floor, floor_unit
+        );
         return Err(2);
     }
     if let Some(ceiling) = ceiling {
@@ -230,7 +235,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
                     option_value(rest, index),
                     "--timeout",
                     TIMEOUT_FLOOR_SECONDS,
-                    "1 second",
+                    "second",
                     None,
                     err,
                 ) {
@@ -244,7 +249,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
                     option_value(rest, index),
                     "--max-cpu",
                     MAX_CPU_FLOOR_SECONDS,
-                    "1 second",
+                    "second",
                     Some(MAX_CPU_CEILING_SECONDS),
                     err,
                 ) {
@@ -258,7 +263,7 @@ pub fn cli_main(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> 
                     option_value(rest, index),
                     "--max-memory",
                     MAX_MEMORY_FLOOR_BYTES,
-                    "16777216 bytes",
+                    "bytes",
                     None,
                     err,
                 ) {
