@@ -1256,9 +1256,8 @@ pub fn init_main(args: &[OsString]) -> i32 {
     };
     if let Some(errno) = arm_errno {
         let detail = format!(
-            "the parent death signal could not be armed, [Errno {}] {}",
-            errno,
-            strerror(errno)
+            "the parent death signal could not be armed, {}",
+            py_os_error(&io::Error::from_raw_os_error(errno))
         );
         return match extract_status_fd(args) {
             Some(fd) => fail(fd, &detail),
