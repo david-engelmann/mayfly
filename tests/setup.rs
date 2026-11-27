@@ -122,6 +122,31 @@ fn flush_step(step_lines: &mut Vec<String>, commands: &mut Vec<String>) {
     step_lines.clear();
 }
 
+fn trigger_block_carries_both(text: &str) -> bool {
+    let mut in_block = false;
+    let mut push = false;
+    let mut pull_request = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "on:" {
+            in_block = true;
+            continue;
+        }
+        if in_block && trimmed.starts_with("permissions:") {
+            break;
+        }
+        if in_block {
+            if trimmed == "push:" {
+                push = true;
+            }
+            if trimmed == "pull_request:" {
+                pull_request = true;
+            }
+        }
+    }
+    push && pull_request
+}
+
 fn run_commands(ci_text: &str) -> Vec<String> {
     let mut commands = Vec::new();
     let mut step_lines: Vec<String> = Vec::new();
@@ -196,6 +221,15 @@ fn toolchain_pins_all_full(text: &str) -> bool {
         }
     }
     seen
+}
+
+#[test]
+fn ci_runs_on_push_and_on_pull_request() {
+    let text = read(".github/workflows/ci.yml");
+    assert!(trigger_block_carries_both(&text));
+    let narrowed = text.replace("  pull_request:\n", "");
+    assert_ne!(narrowed, text);
+    assert!(!trigger_block_carries_both(&narrowed));
 }
 
 #[test]
