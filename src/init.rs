@@ -1061,27 +1061,10 @@ fn parse_init_args(args: &[OsString]) -> Result<InitArgs, InitParseFailure> {
             continue;
         }
         if flag == "--ro-bind-src" {
-            let Some(src) = args.get(index + 1) else {
-                return Err(report_err(
-                    status_fd,
-                    "missing --ro-bind-src value".to_string(),
-                ));
-            };
-            if args.get(index + 2).map(OsString::as_os_str)
-                != Some(std::ffi::OsStr::new("--ro-bind-dst"))
-            {
-                return Err(report_err(
-                    status_fd,
-                    "missing --ro-bind-dst after --ro-bind-src".to_string(),
-                ));
+            match ro_bind_pair_at(args, index) {
+                Ok(pair) => ro_binds.push(pair),
+                Err(msg) => return Err(report_err(status_fd, msg)),
             }
-            let Some(dst) = args.get(index + 3) else {
-                return Err(report_err(
-                    status_fd,
-                    "missing --ro-bind-dst value".to_string(),
-                ));
-            };
-            ro_binds.push((PathBuf::from(src), PathBuf::from(dst)));
             index += 4;
             continue;
         }
@@ -1132,20 +1115,10 @@ fn parse_assemble_args(args: &[OsString]) -> Result<AssembleArgs, Option<String>
             continue;
         }
         if flag == "--ro-bind-src" {
-            let Some(src) = args.get(index + 1) else {
-                return Err(Some("missing --ro-bind-src value".to_string()));
-            };
-            if args.get(index + 2).map(OsString::as_os_str)
-                != Some(std::ffi::OsStr::new("--ro-bind-dst"))
-            {
-                return Err(Some(
-                    "missing --ro-bind-dst after --ro-bind-src".to_string(),
-                ));
+            match ro_bind_pair_at(args, index) {
+                Ok(pair) => ro_binds.push(pair),
+                Err(msg) => return Err(Some(msg)),
             }
-            let Some(dst) = args.get(index + 3) else {
-                return Err(Some("missing --ro-bind-dst value".to_string()));
-            };
-            ro_binds.push((PathBuf::from(src), PathBuf::from(dst)));
             index += 4;
             continue;
         }
@@ -1158,6 +1131,26 @@ fn parse_assemble_args(args: &[OsString]) -> Result<AssembleArgs, Option<String>
         return Err(None);
     };
     Ok(AssembleArgs { rootfs, ro_binds })
+}
+
+/// Read the read-only bind pair whose --ro-bind-src flag
+/// stands at index in the argument list, answering the pair
+/// it reads or the one refusal sentence the reading meets.
+/// The two hidden entry points' parsers share this one
+/// statement of the pair's grammar, as they share
+/// token_refusal for the token check, and each maps the
+/// sentence through its own failure channel.
+fn ro_bind_pair_at(args: &[OsString], index: usize) -> Result<(PathBuf, PathBuf), String> {
+    let Some(src) = args.get(index + 1) else {
+        return Err("missing --ro-bind-src value".to_string());
+    };
+    if args.get(index + 2).map(OsString::as_os_str) != Some(std::ffi::OsStr::new("--ro-bind-dst")) {
+        return Err("missing --ro-bind-dst after --ro-bind-src".to_string());
+    }
+    let Some(dst) = args.get(index + 3) else {
+        return Err("missing --ro-bind-dst value".to_string());
+    };
+    Ok((PathBuf::from(src), PathBuf::from(dst)))
 }
 
 /// Write one line to standard error without ever panicking.
