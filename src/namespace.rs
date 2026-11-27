@@ -662,18 +662,6 @@ impl NamespaceBackend {
         };
         let (program, argv) =
             self.unshare_argv(ctx.spec, ctx.sandbox_dir, status_w, ctx.resolved_binds);
-        // An argument carrying a NUL byte can never reach an
-        // exec, and the Python harness refused it at spawn with
-        // this wording, before anything was launched.
-        let has_nul =
-            program.as_bytes().contains(&0) || argv.iter().any(|arg| arg.as_bytes().contains(&0));
-        if has_nul {
-            close_fd(status_r);
-            close_fd(status_w);
-            ctx.report.error = Some("could not launch unshare, embedded null byte".to_string());
-            self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, None);
-            return;
-        }
         let mut env = self.task_env(ctx.spec);
         // The internal token rides to the unshare process and
         // through it to the init, so the hidden entry points can
@@ -686,6 +674,22 @@ impl NamespaceBackend {
             OsString::from(crate::INTERNAL_TOKEN_ENV),
             OsString::from(ctx.token),
         ));
+        // An argument or an environment pair carrying a NUL
+        // byte can never reach an exec, and the Python harness
+        // refused it at spawn with this wording, before
+        // anything was launched.
+        let has_nul = program.as_bytes().contains(&0)
+            || argv.iter().any(|arg| arg.as_bytes().contains(&0))
+            || env
+                .iter()
+                .any(|(key, value)| key.as_bytes().contains(&0) || value.as_bytes().contains(&0));
+        if has_nul {
+            close_fd(status_r);
+            close_fd(status_w);
+            ctx.report.error = Some("could not launch unshare, embedded null byte".to_string());
+            self.teardown(ctx.sandbox_dir, ctx.report, ctx.timings, None);
+            return;
+        }
         let pass_fds: Vec<RawFd> = ctx.spec.pass_fds.clone();
         let mut cmd = Command::new(&program);
         cmd.args(&argv)

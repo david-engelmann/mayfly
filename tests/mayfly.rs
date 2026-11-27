@@ -3266,6 +3266,39 @@ fn a_command_with_a_none_element_is_a_harness_error() {
 }
 
 #[test]
+fn a_nul_byte_in_an_allowlisted_environment_value_is_a_harness_error() {
+    // The environment the runner hands the spawn is built
+    // from pairs a library caller supplies, and a value
+    // carrying a NUL byte can never reach an exec, so the
+    // harness refuses it at the same place and in the same
+    // words as an argument carrying the byte.
+    let tmp = Tmp::new("env-nul-value");
+    ensure_helper();
+    let backend = match NamespaceBackend::new().unshare_path {
+        Some(path) => NamespaceBackend::with_unshare_path(Some(path)),
+        None => NamespaceBackend::with_unshare_path(Some(write_fake_unshare(
+            &tmp.path().join("fakebin"),
+        ))),
+    };
+    let mut task_spec = spec(vec![py()], tmp.path());
+    task_spec.allow_env = vec![os("MAYFLY_KEEP_ME")];
+    task_spec.caller_env = vec![(
+        os("MAYFLY_KEEP_ME"),
+        OsString::from_vec(b"a kept\0value".to_vec()),
+    )];
+    let report = backend.run(&task_spec);
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(report.task_exit_code, None);
+    assert_eq!(report.task_signal, None);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("could not launch unshare, embedded null byte")
+    );
+    assert_eq!(report.sandbox_removed, Some(true));
+    assert!(glob_run_dirs(tmp.path()).is_empty());
+}
+
+#[test]
 fn cli_reports_a_none_command_element_as_a_harness_error() {
     // The command list is handed to the command line entry
     // the way a caller of the library builds it, because
