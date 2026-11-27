@@ -704,6 +704,36 @@ fn the_environment_is_scrubbed_to_the_allowlist() {
 }
 
 #[test]
+fn a_doubled_allowlisted_key_carries_its_first_standing_value() {
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("env-first-standing");
+    let mut task_spec = spec(cmd(&["/usr/bin/env"]), tmp.path());
+    task_spec.allow_env = vec![os("PATH"), os("MAYFLY_KEEP_ME")];
+    task_spec.caller_env = vec![
+        (os("PATH"), os("/usr/bin:/bin")),
+        (os("MAYFLY_KEEP_ME"), os("the first kept value")),
+        (os("PATH"), os("/second/path")),
+        (os("MAYFLY_KEEP_ME"), os("the second kept value")),
+    ];
+    let report = run_task_spec(&task_spec);
+    let seen = parse_env_output(&report.stdout_tail);
+    let expected: BTreeMap<String, String> = [
+        ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+        (
+            "MAYFLY_KEEP_ME".to_string(),
+            "the first kept value".to_string(),
+        ),
+        ("MAYFLY_SANDBOX".to_string(), "namespace".to_string()),
+        ("PYTHONCOERCECLOCALE".to_string(), "0".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(seen, expected);
+}
+
+#[test]
 fn a_file_written_inside_is_gone_with_the_sandbox() {
     if !require_sandbox() {
         return;
