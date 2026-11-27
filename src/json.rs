@@ -132,7 +132,7 @@ pub fn write_json_string(text: &str, out: &mut String) {
             c if (c as u32) < 0x20 => {
                 out.push_str(&format!("\\u{:04x}", c as u32));
             }
-            c if (c as u32) < 0x80 => out.push(c),
+            c if (c as u32) < 0x7f => out.push(c),
             c => {
                 let n = c as u32;
                 if n <= 0xFFFF {
