@@ -12,10 +12,11 @@
 //! run over a tree the local gate has already built in. The scan
 //! root defaults to the current directory, where the setup scanner
 //! defaulted to the root of the repo it shipped in, and the gate
-//! names the root explicitly either way. The scanner takes at most
-//! one argument, the scan root, and an argument standing after the
-//! scan root is refused at exit 2 before any scanning, where the
-//! setup scanner reads its first argument and lets the rest stand.
+//! names no root, running the scan on the default from the root
+//! of the tree it gates. The scanner takes at most one argument,
+//! the scan root, and an argument standing after the scan root is
+//! refused at exit 2 before any scanning, where the setup scanner
+//! reads its first argument and lets the rest stand.
 //! A scan root that does not stand is a scan error at exit 2, where
 //! the setup scanner exited 0 with zero counts. A file that cannot
 //! be read is a clean scan
