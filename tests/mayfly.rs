@@ -734,6 +734,63 @@ fn a_doubled_allowlisted_key_carries_its_first_standing_value() {
 }
 
 #[test]
+fn the_allowlist_default_carries_path_alone_on_both_surfaces() {
+    // MF-P71. The allowlist default, PATH standing alone
+    // where no key is named, stands produced at two seats
+    // and pinned at neither, because every drive that reads
+    // a task's environment names its keys outright. The
+    // constructor sets the field to the one key, and the
+    // command line pushes PATH onto its empty collected
+    // list before assigning that list over the field, so a
+    // default dropped at either seat, the constructor
+    // defaulting to an empty list or the command line
+    // letting its empty list stand, passes every standing
+    // drive while a task that should carry the caller's
+    // PATH carries no caller value at all. On the library
+    // surface the spec stands as the constructor leaves it
+    // with no allow_env assignment, its caller environment
+    // carrying a PATH value and one unnamed key, and the
+    // task's reported environment carries PATH at the
+    // caller's value and does not carry the unnamed key. On
+    // the command line surface the same drive stands with
+    // no --allow-env flag, the caller environment carrying
+    // the same two, and PATH stands in the task's
+    // environment at the caller's value while the unnamed
+    // key does not stand.
+    if !require_sandbox() {
+        return;
+    }
+    let tmp = Tmp::new("env-default-library");
+    let mut task_spec = spec(cmd(&["/usr/bin/env"]), tmp.path());
+    task_spec.caller_env = vec![
+        (os("PATH"), os("/usr/bin:/bin")),
+        (os("MAYFLY_LEAK_PROBE"), os("a secret value")),
+    ];
+    let report = run_task_spec(&task_spec);
+    let seen = parse_env_output(&report.stdout_tail);
+    assert_eq!(seen.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));
+    assert!(!seen.contains_key("MAYFLY_LEAK_PROBE"));
+    let tmp = Tmp::new("env-default-cli");
+    let args = cli_args(tmp.path(), &cmd(&["/usr/bin/env"]));
+    let result = run_cli(
+        &args,
+        &[
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            (
+                "MAYFLY_LEAK_PROBE".to_string(),
+                "a secret value".to_string(),
+            ),
+        ],
+    );
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    let payload: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(payload["outcome"], "task");
+    let tail = payload["stdout_tail"].as_str().unwrap();
+    assert!(tail.contains("PATH=/usr/bin:/bin"), "{}", tail);
+    assert!(!tail.contains("MAYFLY_LEAK_PROBE"), "{}", tail);
+}
+
+#[test]
 fn a_file_written_inside_is_gone_with_the_sandbox() {
     if !require_sandbox() {
         return;
