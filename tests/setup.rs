@@ -373,16 +373,9 @@ fn scan_tree(root: &Path) -> ScanOutput {
 }
 
 fn scan_tree_with_extra(root: &Path, extra: &str) -> ScanOutput {
-    let output = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"))
-        .arg(root)
-        .arg(extra)
-        .output()
-        .unwrap();
-    ScanOutput {
-        status: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codepoint_scan"));
+    command.arg(root).arg(extra);
+    scan_output(command)
 }
 
 fn scan_from(dir: &Path) -> ScanOutput {
