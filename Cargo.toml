@@ -1,9 +1,18 @@
 [package]
 name = "mayfly"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.91"
+default-run = "mayfly"
 description = "Runs one command in a disposable directory with a scrubbed environment and the network off by default, mirrors the command's exit code, and deletes the directory when the command ends."
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/david-engelmann/mayfly"
+homepage = "https://github.com/david-engelmann/mayfly"
+documentation = "https://docs.rs/mayfly"
+keywords = ["sandbox", "namespace", "isolation", "linux", "agent"]
+categories = ["command-line-utilities", "os::linux-apis"]
+exclude = [".github/**"]
 
 [lib]
 name = "mayfly"
