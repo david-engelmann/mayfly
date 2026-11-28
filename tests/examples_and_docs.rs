@@ -165,6 +165,11 @@ fn prose_scanner_rejects_colons_semicolons_and_table_prose_punctuation() {
         )
         .is_empty()
     );
+    assert!(
+        check_prose_violations("Intro line.\n```sh\nrun it: now; done\n```\nAfter line.\n")
+            .is_empty()
+    );
+    assert!(!check_prose_violations("Intro line.\n```sh\nrun it\n```\nAfter: bad.\n").is_empty());
 }
 
 #[test]
