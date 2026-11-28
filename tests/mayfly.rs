@@ -3390,6 +3390,36 @@ fn a_nul_byte_in_an_allowlisted_environment_key_is_a_harness_error() {
 }
 
 #[test]
+fn a_nul_byte_in_the_unshare_program_path_is_a_harness_error() {
+    // MF-P76. The scan that refuses a NUL byte before the
+    // spawn tests the program beside every argument and
+    // every environment pair, and the argument and pair
+    // members stand pinned above. The program member stands
+    // staged nowhere, because the resolved program is built
+    // by helper resolution and carries no byte, while the
+    // public constructor hands the scan whatever path it is
+    // given. A scan without the program member passes every
+    // standing pin and lets this path through to the spawn,
+    // which answers in its own words in place of the harness
+    // sentence.
+    let tmp = Tmp::new("program-nul");
+    ensure_helper();
+    let backend = NamespaceBackend::with_unshare_path(Some(PathBuf::from(OsString::from_vec(
+        b"un\0share".to_vec(),
+    ))));
+    let report = backend.run(&spec(vec![py()], tmp.path()));
+    assert_eq!(report.outcome, Outcome::HarnessError);
+    assert_eq!(report.task_exit_code, None);
+    assert_eq!(report.task_signal, None);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("could not launch unshare, embedded null byte")
+    );
+    assert_eq!(report.sandbox_removed, Some(true));
+    assert!(glob_run_dirs(tmp.path()).is_empty());
+}
+
+#[test]
 fn cli_reports_a_none_command_element_as_a_harness_error() {
     // The command list is handed to the command line entry
     // the way a caller of the library builds it, because
