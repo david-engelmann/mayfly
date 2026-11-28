@@ -160,14 +160,18 @@ fn run_commands(text: &str, job_name: &str) -> Vec<String> {
         if stripped.starts_with('#') {
             continue;
         }
-        if stripped == job_head {
+        let head_form = match stripped.find(" #") {
+            Some(at) => stripped[..at].trim(),
+            None => stripped,
+        };
+        if head_form == job_head {
             in_job = true;
             job_indent = line.len() - line.trim_start().len();
             continue;
         }
         if in_job {
             let indent = line.len() - line.trim_start().len();
-            if !stripped.is_empty() && indent <= job_indent && stripped.ends_with(':') {
+            if !head_form.is_empty() && indent <= job_indent && head_form.ends_with(':') {
                 break;
             }
         }
@@ -390,6 +394,48 @@ fn gate_parser_collects_only_the_named_jobs_commands() {
         assert!(!commands.iter().any(|c| c == FMT_COMMAND));
         assert!(!commands.iter().any(|c| c == CLIPPY_COMMAND));
     }
+}
+
+#[test]
+fn gate_parser_closes_the_span_at_a_commented_job_head() {
+    // MF-P75. run_commands judges the span's two boundary
+    // lines in their raw stripped form, so a job head
+    // carrying a trailing comment is no head at either
+    // boundary. Standing as the next job's head it never
+    // closes the named job's span, and the second job's
+    // gate commands pour into the named job's collection
+    // while every pin passes. Standing as the named job's
+    // own head it never opens the span, and the job's own
+    // commands collect nowhere. The staged texts carry
+    // the MF-P73 pin's two jobs with a trailing comment on
+    // the second job's head in both orders, and the named
+    // job carrying the four gate commands under a head
+    // carrying a trailing comment of its own.
+    let named_job = "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8\n        with:\n          toolchain: \"1.91.1\"\n          components: rustfmt, clippy\n";
+    let commented_gate_job = format!(
+        "  gate: # the gate job\n    runs-on: ubuntu-latest\n    steps:\n      - name: Run the local gate\n        run: {GATE_COMMAND}\n      - name: Run the codepoint scan\n        run: {SCAN_COMMAND}\n      - name: Check the formatting\n        run: {FMT_COMMAND}\n      - name: Run the linter\n        run: {CLIPPY_COMMAND}\n"
+    );
+    let head =
+        "name: CI\n\non:\n  push:\n  pull_request:\n\npermissions:\n  contents: read\n\njobs:\n";
+    for text in [
+        format!("{head}{named_job}{commented_gate_job}"),
+        format!("{head}{commented_gate_job}{named_job}"),
+    ] {
+        let commands = run_commands(&text, "test");
+        assert!(!commands.iter().any(|c| c == GATE_COMMAND));
+        assert!(!commands.iter().any(|c| c == SCAN_COMMAND));
+        assert!(!commands.iter().any(|c| c == FMT_COMMAND));
+        assert!(!commands.iter().any(|c| c == CLIPPY_COMMAND));
+    }
+    let commented_named_job = format!(
+        "  test: # the named job\n    runs-on: ubuntu-latest\n    steps:\n      - name: Run the local gate\n        run: {GATE_COMMAND}\n      - name: Run the codepoint scan\n        run: {SCAN_COMMAND}\n      - name: Check the formatting\n        run: {FMT_COMMAND}\n      - name: Run the linter\n        run: {CLIPPY_COMMAND}\n"
+    );
+    let text = format!("{head}{commented_named_job}");
+    let commands = run_commands(&text, "test");
+    assert!(commands.iter().any(|c| c == GATE_COMMAND));
+    assert!(commands.iter().any(|c| c == SCAN_COMMAND));
+    assert!(commands.iter().any(|c| c == FMT_COMMAND));
+    assert!(commands.iter().any(|c| c == CLIPPY_COMMAND));
 }
 
 struct ScanOutput {
