@@ -249,6 +249,20 @@ fn rust_quickstart_example_runs_end_to_end() {
         &repo_root().join("examples/quickstart.rs"),
         &std::fs::read_to_string(repo_root().join("examples/quickstart.rs")).unwrap(),
     );
+    let source = std::fs::read_to_string(repo_root().join("examples/quickstart.rs")).unwrap();
+    for required in [
+        "1. resolved backend=",
+        "2. pre-prepare timeout=0 refused cleanly before directory creation",
+        "3. pre-prepare missing --ro-bind source refused cleanly",
+        "4. Linux namespace sandbox ran and incinerated cleanly",
+        "4. host restricted unprivileged user namespaces",
+        "4. live namespace spawn requires Linux (spec and pre-prepare checks passed)",
+    ] {
+        assert!(
+            source.contains(required),
+            "examples/quickstart.rs missing {required:?}"
+        );
+    }
     mayfly::set_helper_exe(Path::new(env!("CARGO_BIN_EXE_mayfly")));
     quickstart::run_quickstart().expect("examples/quickstart.rs runs end to end");
 }
