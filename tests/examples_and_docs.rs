@@ -245,11 +245,9 @@ fn readme_install_avoids_third_party_bare_crate_and_links_guides() {
 
 #[test]
 fn rust_quickstart_example_runs_end_to_end() {
-    assert_sanitized(
-        &repo_root().join("examples/quickstart.rs"),
-        &std::fs::read_to_string(repo_root().join("examples/quickstart.rs")).unwrap(),
-    );
-    let source = std::fs::read_to_string(repo_root().join("examples/quickstart.rs")).unwrap();
+    let quickstart_path = repo_root().join("examples/quickstart.rs");
+    let source = std::fs::read_to_string(&quickstart_path).unwrap();
+    assert_sanitized(&quickstart_path, &source);
     for required in [
         "1. resolved backend=",
         "2. pre-prepare timeout=0 refused cleanly before directory creation",
@@ -257,6 +255,8 @@ fn rust_quickstart_example_runs_end_to_end() {
         "4. Linux namespace sandbox ran and incinerated cleanly",
         "4. host restricted unprivileged user namespaces",
         "4. live namespace spawn requires Linux (spec and pre-prepare checks passed)",
+        "Ok(()) => ExitCode::SUCCESS",
+        "ExitCode::from(1)",
     ] {
         assert!(
             source.contains(required),
@@ -408,6 +408,8 @@ fn visual_assets_contributing_and_issue_forms_satisfy_mf17() {
         "codepoint_scan",
         "clippy",
         "cargo doc --locked --no-deps",
+        "U+2014",
+        "U+2013",
         "SYNTHETIC-TEST-VALUE-",
         "[SECURITY.md](SECURITY.md)",
     ] {
@@ -446,17 +448,222 @@ fn visual_assets_contributing_and_issue_forms_satisfy_mf17() {
                 block_indent = Some(indent);
                 continue;
             }
-            if v.chars().filter(|c| *c == '"').count() % 2 != 0 {
-                return false;
-            }
-            if v.chars().filter(|c| *c == '[').count() != v.chars().filter(|c| *c == ']').count() {
+            if !valid_yaml_value(v) {
                 return false;
             }
         }
         true
     }
+    fn valid_yaml_tail(tail: &str) -> bool {
+        let trimmed = tail.trim_start();
+        trimmed.is_empty() || trimmed.starts_with('#')
+    }
+    fn valid_double_quote_escape<I: Iterator<Item = char>>(chars: &mut I) -> bool {
+        let Some(esc) = chars.next() else {
+            return false;
+        };
+        let hex_len = match esc {
+            '0' | 'a' | 'b' | 't' | '\t' | 'n' | 'v' | 'f' | 'r' | 'e' | ' ' | '"' | '/' | '\\'
+            | 'N' | '_' | 'L' | 'P' => 0,
+            'x' => 2,
+            'u' => 4,
+            'U' => 8,
+            _ => return false,
+        };
+        for _ in 0..hex_len {
+            match chars.next() {
+                Some(h) if h.is_ascii_hexdigit() => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+    fn valid_yaml_value(v: &str) -> bool {
+        if v.is_empty() {
+            return true;
+        }
+        if let Some(rest) = v.strip_prefix('\'') {
+            let mut chars = rest.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\'' {
+                    if chars.peek() == Some(&'\'') {
+                        chars.next();
+                    } else {
+                        let rem: String = chars.collect();
+                        return valid_yaml_tail(&rem);
+                    }
+                }
+            }
+            return false;
+        }
+        if let Some(rest) = v.strip_prefix('"') {
+            let mut chars = rest.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    if !valid_double_quote_escape(&mut chars) {
+                        return false;
+                    }
+                } else if c == '"' {
+                    let rem: String = chars.collect();
+                    return valid_yaml_tail(&rem);
+                }
+            }
+            return false;
+        }
+        if v.starts_with('[') {
+            let mut depth = 0usize;
+            let mut chars = v.chars().peekable();
+            let mut expect_elem = true;
+            let mut after_elem = false;
+            while let Some(c) = chars.next() {
+                if c.is_whitespace() {
+                    continue;
+                }
+                if c == '#' {
+                    return depth == 0;
+                }
+                if after_elem {
+                    if c == ',' && depth > 0 {
+                        expect_elem = true;
+                        after_elem = false;
+                        continue;
+                    } else if c == ']' && depth > 0 {
+                        depth -= 1;
+                        if depth == 0 {
+                            let rem: String = chars.collect();
+                            return valid_yaml_tail(&rem);
+                        }
+                        continue;
+                    } else {
+                        return false;
+                    }
+                }
+                if expect_elem {
+                    if c == '[' {
+                        depth += 1;
+                        continue;
+                    } else if c == ']' && depth > 0 {
+                        depth -= 1;
+                        if depth == 0 {
+                            let rem: String = chars.collect();
+                            return valid_yaml_tail(&rem);
+                        }
+                        expect_elem = false;
+                        after_elem = true;
+                        continue;
+                    } else if c == '\'' {
+                        let mut closed = false;
+                        while let Some(sc) = chars.next() {
+                            if sc == '\'' {
+                                if chars.peek() == Some(&'\'') {
+                                    chars.next();
+                                } else {
+                                    closed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !closed {
+                            return false;
+                        }
+                        expect_elem = false;
+                        after_elem = true;
+                        continue;
+                    } else if c == '"' {
+                        let mut closed = false;
+                        while let Some(dc) = chars.next() {
+                            if dc == '\\' {
+                                if !valid_double_quote_escape(&mut chars) {
+                                    return false;
+                                }
+                            } else if dc == '"' {
+                                closed = true;
+                                break;
+                            }
+                        }
+                        if !closed {
+                            return false;
+                        }
+                        expect_elem = false;
+                        after_elem = true;
+                        continue;
+                    } else if c == ',' {
+                        return false;
+                    } else {
+                        while let Some(&pc) = chars.peek() {
+                            if pc == ',' || pc == ']' || pc == '[' {
+                                break;
+                            }
+                            if pc.is_whitespace() {
+                                chars.next();
+                                if chars.peek() == Some(&'#') {
+                                    return false;
+                                }
+                                continue;
+                            }
+                            chars.next();
+                        }
+                        expect_elem = false;
+                        after_elem = true;
+                        continue;
+                    }
+                }
+            }
+            return false;
+        }
+        let mut chars = v.chars().peekable();
+        let mut prev_ws = false;
+        while let Some(c) = chars.next() {
+            if c == '#' && prev_ws {
+                break;
+            }
+            if c == ':' {
+                match chars.peek() {
+                    None => return false,
+                    Some(next) if next.is_whitespace() => return false,
+                    _ => {}
+                }
+            }
+            prev_ws = c.is_whitespace();
+        }
+        true
+    }
     assert!(!valid_issue_form_yaml("name: Bug report\nbroken: [\n"));
     assert!(!valid_issue_form_yaml("name: Bug report\n\tbad: true\n"));
+    assert!(!valid_issue_form_yaml("name: Bug report\ntitle: '[bug]\n"));
+    assert!(!valid_issue_form_yaml("name: Bug report\ntitle: '''\n"));
+    assert!(!valid_issue_form_yaml("name: Bug report\ntitle: 'bug''\n"));
+    assert!(!valid_issue_form_yaml(
+        "name: Bug report\ntitle: 'bug'oops'\n"
+    ));
+    assert!(!valid_issue_form_yaml(
+        "name: Bug report\nlabels: ['enhancement]\n"
+    ));
+    assert!(!valid_issue_form_yaml(
+        "name: Bug report\ntitle: \"bug\\\"\n"
+    ));
+    assert!(!valid_issue_form_yaml("name: Bug report\ntitle: \"\\q\"\n"));
+    assert!(!valid_issue_form_yaml(
+        "name: Bug report\nlabels: [\"\\u12\"]\n"
+    ));
+    assert!(valid_issue_form_yaml(
+        "name: Bug report\ntitle: '[bug]' # comment\n"
+    ));
+    assert!(valid_issue_form_yaml(
+        "name: Bug report\ntitle: 'it''s ok'\n"
+    ));
+    assert!(valid_issue_form_yaml(
+        "name: Bug report\ntitle: \"don't\"\n"
+    ));
+    assert!(valid_issue_form_yaml(
+        "name: Bug report\ndescription: Explain \"expected\" behavior\n"
+    ));
+    assert!(valid_issue_form_yaml(
+        "name: Bug report\ndescription: Use [workspace] paths\n"
+    ));
+    assert!(valid_issue_form_yaml(
+        "name: Bug report\nlabels: [don't, team's-label]\n"
+    ));
 
     for (rel, markers) in [
         (
