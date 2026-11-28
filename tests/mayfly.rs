@@ -3285,6 +3285,19 @@ fn a_slow_janitor_on_the_clean_path_is_reaped_by_a_detached_waiter() {
 
 // ---------- commands no exec can carry ----------
 
+fn backend_reaching_the_nul_check(root: &Path) -> NamespaceBackend {
+    // On hosts without a native unshare binary on PATH, supply the
+    // fake unshare path so the run reaches the embedded NUL check in
+    // run_supervised rather than stopping early on missing unshare.
+    ensure_helper();
+    match NamespaceBackend::new().unshare_path {
+        Some(path) => NamespaceBackend::with_unshare_path(Some(path)),
+        None => {
+            NamespaceBackend::with_unshare_path(Some(write_fake_unshare(&root.join("fakebin"))))
+        }
+    }
+}
+
 #[test]
 fn a_command_with_a_none_element_is_a_harness_error() {
     // A Python command list can carry a none element, and the
@@ -3294,16 +3307,7 @@ fn a_command_with_a_none_element_is_a_harness_error() {
     // the same place with the same report.
     let tmp = Tmp::new("none-element");
     let bad = OsString::from_vec(b"bad\0arg".to_vec());
-    // On hosts without a native unshare binary on PATH, supply the
-    // fake unshare path so the run reaches the embedded NUL check in
-    // run_supervised rather than stopping early on missing unshare.
-    ensure_helper();
-    let backend = match NamespaceBackend::new().unshare_path {
-        Some(path) => NamespaceBackend::with_unshare_path(Some(path)),
-        None => NamespaceBackend::with_unshare_path(Some(write_fake_unshare(
-            &tmp.path().join("fakebin"),
-        ))),
-    };
+    let backend = backend_reaching_the_nul_check(tmp.path());
     let report = backend.run(&spec(vec![py(), bad], tmp.path()));
     assert_eq!(report.outcome, Outcome::HarnessError);
     assert_eq!(report.task_exit_code, None);
@@ -3330,13 +3334,7 @@ fn a_nul_byte_in_an_allowlisted_environment_value_is_a_harness_error() {
     // harness refuses it at the same place and in the same
     // words as an argument carrying the byte.
     let tmp = Tmp::new("env-nul-value");
-    ensure_helper();
-    let backend = match NamespaceBackend::new().unshare_path {
-        Some(path) => NamespaceBackend::with_unshare_path(Some(path)),
-        None => NamespaceBackend::with_unshare_path(Some(write_fake_unshare(
-            &tmp.path().join("fakebin"),
-        ))),
-    };
+    let backend = backend_reaching_the_nul_check(tmp.path());
     let mut task_spec = spec(vec![py()], tmp.path());
     task_spec.allow_env = vec![os("MAYFLY_KEEP_ME")];
     task_spec.caller_env = vec![(
@@ -3366,13 +3364,7 @@ fn a_nul_byte_in_an_allowlisted_environment_key_is_a_harness_error() {
     // scan testing the pairs' values alone passes every
     // standing pin and lets this key through to the spawn.
     let tmp = Tmp::new("env-nul-key");
-    ensure_helper();
-    let backend = match NamespaceBackend::new().unshare_path {
-        Some(path) => NamespaceBackend::with_unshare_path(Some(path)),
-        None => NamespaceBackend::with_unshare_path(Some(write_fake_unshare(
-            &tmp.path().join("fakebin"),
-        ))),
-    };
+    let backend = backend_reaching_the_nul_check(tmp.path());
     let bad_key = OsString::from_vec(b"MAYFLY_KE\0EP_ME".to_vec());
     let mut task_spec = spec(vec![py()], tmp.path());
     task_spec.allow_env = vec![bad_key.clone()];
