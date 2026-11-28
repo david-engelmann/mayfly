@@ -1037,7 +1037,7 @@ fn mf15_release_packaging_metadata_and_version_parity() {
         "readme = \"README.md\"",
         "repository = \"https://github.com/david-engelmann/mayfly\"",
         "homepage = \"https://github.com/david-engelmann/mayfly\"",
-        "documentation = \"https://docs.rs/mayfly\"",
+        "documentation = \"https://github.com/david-engelmann/mayfly#readme\"",
         "keywords = [",
         "categories = [",
         "exclude = [\".github/**\"]",
